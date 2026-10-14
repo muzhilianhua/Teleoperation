@@ -10,6 +10,7 @@ const char* faultToString(Fault fault) {
     case Fault::None: return "none";
     case Fault::CommLost: return "comm lost";
     case Fault::ServoError: return "servo error";
+    case Fault::ServoVoltage: return "servo voltage error";
     case Fault::TorqueMismatch: return "torque mismatch";
     case Fault::LoadHard: return "load hard limit";
     case Fault::LoadTrip: return "load trip";
@@ -20,6 +21,18 @@ const char* faultToString(Fault fault) {
   return "?";
 }
 
+FaultScope faultScope(Fault fault) {
+  switch (fault) {
+    case Fault::CommLost:
+    case Fault::ServoVoltage:
+    case Fault::TorqueMismatch:
+    case Fault::SupplyVoltage:
+      return FaultScope::Hand;
+    default:
+      return FaultScope::Joint;
+  }
+}
+
 Fault JointSupervisor::update(const ServoSample& s, bool armed, float goal, float reference,
                               uint32_t nowMs) {
   if (!s.readOk) {
@@ -28,6 +41,7 @@ Fault JointSupervisor::update(const ServoSample& s, bool armed, float goal, floa
   }
   failures_ = 0;
 
+  if (s.errorByte & kServoErrorVoltageBit) return Fault::ServoVoltage;
   if (s.errorByte != 0 || s.status != 0) return Fault::ServoError;
   if (s.torqueOn != armed) return Fault::TorqueMismatch;
 

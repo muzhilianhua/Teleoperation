@@ -223,6 +223,29 @@ void test_supervisor_lag_behind_model_trips() {
   TEST_ASSERT_EQUAL(Fault::TrackingError, sup.update(s, true, 700.0f, 590.0f, 400));
 }
 
+void test_supervisor_voltage_bit_is_its_own_fault() {
+  JointSupervisor sup;
+  ServoSample s = healthy(true);
+  s.errorByte = 0x01;
+  TEST_ASSERT_EQUAL(Fault::ServoVoltage, sup.update(s, true, 500.0f, 500.0f, 0));
+  s.errorByte = 0x21;  // voltage + overload: voltage wins, it affects the whole hand
+  TEST_ASSERT_EQUAL(Fault::ServoVoltage, sup.update(s, true, 500.0f, 500.0f, 0));
+  s.errorByte = 0x20;
+  TEST_ASSERT_EQUAL(Fault::ServoError, sup.update(s, true, 500.0f, 500.0f, 0));
+}
+
+void test_fault_scope() {
+  TEST_ASSERT_EQUAL(FaultScope::Hand, faultScope(Fault::CommLost));
+  TEST_ASSERT_EQUAL(FaultScope::Hand, faultScope(Fault::ServoVoltage));
+  TEST_ASSERT_EQUAL(FaultScope::Hand, faultScope(Fault::TorqueMismatch));
+  TEST_ASSERT_EQUAL(FaultScope::Hand, faultScope(Fault::SupplyVoltage));
+  TEST_ASSERT_EQUAL(FaultScope::Joint, faultScope(Fault::ServoError));
+  TEST_ASSERT_EQUAL(FaultScope::Joint, faultScope(Fault::LoadTrip));
+  TEST_ASSERT_EQUAL(FaultScope::Joint, faultScope(Fault::LoadHard));
+  TEST_ASSERT_EQUAL(FaultScope::Joint, faultScope(Fault::Overheat));
+  TEST_ASSERT_EQUAL(FaultScope::Joint, faultScope(Fault::TrackingError));
+}
+
 // ---- jump guard --------------------------------------------------------------
 
 void test_jump_guard_rejects_single_glitch() {
@@ -283,6 +306,8 @@ int main() {
   RUN_TEST(test_supervisor_servo_faster_than_model_is_fine);
   RUN_TEST(test_supervisor_goal_outrunning_capability_is_fine);
   RUN_TEST(test_supervisor_lag_behind_model_trips);
+  RUN_TEST(test_supervisor_voltage_bit_is_its_own_fault);
+  RUN_TEST(test_fault_scope);
   RUN_TEST(test_jump_guard_rejects_single_glitch);
   RUN_TEST(test_jump_guard_resyncs_after_persistent_jump);
   RUN_TEST(test_jump_guard_reset_accepts_anything);

@@ -32,7 +32,8 @@ class Persistence {
 enum class Fault : uint8_t {
   None = 0,
   CommLost,        // consecutive servo read failures
-  ServoError,      // non-zero status error byte or status register
+  ServoError,      // non-zero status error byte (other than voltage) or status register
+  ServoVoltage,    // the servo itself reports an input-voltage error (error bit 0x01)
   TorqueMismatch,  // servo torque state disagrees with the firmware
   LoadHard,
   LoadTrip,
@@ -42,6 +43,15 @@ enum class Fault : uint8_t {
 };
 
 const char* faultToString(Fault fault);
+
+// Joint: only the joint that raised it loses torque, the rest keep following.
+// Hand: the cause is shared (supply, bus) or the firmware state can no longer
+// be trusted (torque mismatch), so every servo is switched off.
+// Matches the per-fault actions of servo_bringup's supervisor.
+enum class FaultScope : uint8_t { Joint, Hand };
+FaultScope faultScope(Fault fault);
+
+constexpr uint8_t kServoErrorVoltageBit = 0x01;  // status-packet error byte
 
 struct SupervisorConfig {
   float loadTripPct = 75.0f;
