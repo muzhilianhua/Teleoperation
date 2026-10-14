@@ -303,6 +303,14 @@ void test_parse_basic_commands() {
   ParsedCommand c;
   TEST_ASSERT_NULL(parseCommand("  ARM ", c));
   TEST_ASSERT_EQUAL(Verb::Arm, c.verb);
+  TEST_ASSERT_EQUAL(0, c.joint);
+  TEST_ASSERT_NULL(parseCommand("arm 4", c));
+  TEST_ASSERT_EQUAL(Verb::Arm, c.verb);
+  TEST_ASSERT_EQUAL(4, c.joint);
+  TEST_ASSERT_NULL(parseCommand("disarm 9", c));
+  TEST_ASSERT_EQUAL(Verb::Disarm, c.verb);
+  TEST_ASSERT_EQUAL(9, c.joint);
+  TEST_ASSERT_FALSE(requiresDisarmed(c));  // single-joint arm/disarm works while others follow
   TEST_ASSERT_NULL(parseCommand("", c));
   TEST_ASSERT_EQUAL(Verb::None, c.verb);
   TEST_ASSERT_NULL(parseCommand("# comment", c));

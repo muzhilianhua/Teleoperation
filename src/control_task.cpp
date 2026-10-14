@@ -7,6 +7,7 @@
 #include "config_store.h"
 
 using teleop::Fault;
+using teleop::FaultScope;
 using teleop::JumpGuard;
 using teleop::Verb;
 
@@ -29,12 +30,12 @@ const char* notReadyReason(const teleop::JointSettings& s, const teleop::JointDe
 
 TeleopController* TeleopController::instance_ = nullptr;
 
-const char* teleopStateToString(TeleopState state) {
+const char* jointStateToString(JointState state) {
   switch (state) {
-    case TeleopState::Idle: return "IDLE";
-    case TeleopState::Align: return "ALIGN";
-    case TeleopState::Follow: return "FOLLOW";
-    case TeleopState::Hold: return "HOLD";
+    case JointState::Off: return "OFF";
+    case JointState::Align: return "ALIGN";
+    case JointState::Follow: return "FOLLOW";
+    case JointState::Hold: return "HOLD";
   }
   return "?";
 }
@@ -114,12 +115,18 @@ TeleopController::JointChannel* TeleopController::channelForServo(uint8_t servoI
   return index < 0 ? nullptr : &channels_[index];
 }
 
+uint8_t TeleopController::armedCount() const {
+  uint8_t n = 0;
+  for (const JointChannel& ch : channels_) n += ch.armed() ? 1 : 0;
+  return n;
+}
+
 void TeleopController::resetChannelRuntime(JointChannel& ch) {
   ch.filter.reset();
   ch.guard.reset();
   ch.supervisor.reset();
   ch.refCaptured = teleop::exoCalibrated(ch.settings);
-  ch.active = false;
+  ch.state = JointState::Off;
   ch.encBad = 0;
   ch.encFresh = false;
   ch.reportedFault = Fault::None;
@@ -132,7 +139,7 @@ void TeleopController::applyRuntimeParams(JointChannel& ch) {
   sc.trackingErrorSteps = ch.settings.trackSteps;
   ch.supervisor.setConfig(sc);
   ch.limiter.setTravel(ch.def->travelMin, ch.def->travelMax);
-  const float speed = state_ == TeleopState::Align ? config::kArmSpeed : ch.settings.vmax;
+  const float speed = ch.state == JointState::Align ? config::kArmSpeed : ch.settings.vmax;
   ch.limiter.setLimits(speed, ch.settings.amax);
   ch.model.setTravel(ch.def->travelMin, ch.def->travelMax);
   ch.model.setLimits(ch.settings.vsat, kModelAcceleration);
@@ -197,8 +204,8 @@ void TeleopController::cycle() {
   }
 
   readServos(nowMs);
-  stepStateMachine(dt, nowMs);
-  writeGoals();
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) stepJoint(i, dt, nowMs);
+  writeGoals(nowMs);
 }
 
 bool TeleopController::encoderSample(uint8_t index, uint16_t& raw) const {
@@ -248,36 +255,49 @@ void TeleopController::processEncoder(JointChannel& ch, float dt) {
   }
 }
 
+void TeleopController::readMonitor() {
+  // One servo per cycle so a full sweep of the hand costs ~0.6 ms per cycle.
+  const uint8_t i = monitorIndex_;
+  monitorIndex_ = static_cast<uint8_t>((monitorIndex_ + 1) % teleop::kMaxJoints);
+  JointChannel& ch = channels_[i];
+  ServoState st;
+  monitorOk_[i] = bus_.readState(ch.def->servoId, st);
+  if (monitorOk_[i]) {
+    monitorPosition_[i] = st.position;
+    ch.servo = st;
+  }
+  ch.servoOk = monitorOk_[i];
+}
+
 void TeleopController::readServos(uint32_t nowMs) {
-  if (monitor_ && !armed_) {
-    // One servo per cycle so a full sweep of the hand costs ~0.6 ms per cycle.
-    const uint8_t i = monitorIndex_;
-    monitorIndex_ = static_cast<uint8_t>((monitorIndex_ + 1) % teleop::kMaxJoints);
-    ServoState st;
-    monitorOk_[i] = bus_.readState(channels_[i].def->servoId, st);
-    if (monitorOk_[i]) {
-      monitorPosition_[i] = st.position;
-      channels_[i].servo = st;
-    }
-    channels_[i].servoOk = monitorOk_[i];
+  for (JointChannel& ch : channels_) ch.readThisCycle = false;
+  if (monitor_ && armedCount() == 0) {
+    readMonitor();
     return;
   }
 
-  float voltages[teleop::kMaxJoints];
-  uint8_t voltageCount = 0;
-  Fault pending = Fault::None;
-  int pendingJoint = -1;
+  // Round-robin over enabled (or armed) joints, at most kServoReadsPerCycle per cycle.
+  uint8_t candidates[teleop::kMaxJoints];
+  uint8_t n = 0;
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    if (channels_[i].settings.enabled || channels_[i].armed()) candidates[n++] = i;
+  }
+  const uint8_t reads = n < config::kServoReadsPerCycle ? n : config::kServoReadsPerCycle;
+
+  Fault handFault = Fault::None;
+  int handJoint = -1;
+  Fault jointFaults[teleop::kMaxJoints];
+  for (Fault& f : jointFaults) f = Fault::None;
+
+  for (uint8_t k = 0; k < reads; ++k) {
+    const uint8_t i = candidates[(readCursor_ + k) % n];
     JointChannel& ch = channels_[i];
-    if (!ch.settings.enabled) {
-      ch.servoOk = false;
-      continue;
-    }
     ServoState st;
+    ch.readThisCycle = true;
     ch.servoOk = bus_.readState(ch.def->servoId, st);
     if (ch.servoOk) {
       ch.servo = st;
-      voltages[voltageCount++] = st.voltage;
+      ch.lastGoodReadMs = nowMs;
     }
     teleop::ServoSample sample;
     sample.readOk = ch.servoOk;
@@ -288,146 +308,137 @@ void TeleopController::readServos(uint32_t nowMs) {
     sample.temperatureC = st.temperatureC;
     sample.errorByte = st.errorByte;
     sample.status = st.status;
-    const bool armedJoint = armed_ && ch.active;
-    const Fault fault = ch.supervisor.update(sample, armedJoint, ch.goal, ch.reference, nowMs);
-    if (fault != Fault::None) {
-      if (armedJoint) {
-        if (pending == Fault::None) {
-          pending = fault;
-          pendingJoint = i;
-        }
-      } else {
-        if (fault == Fault::TorqueMismatch) bus_.writeTorque(ch.def->servoId, false);
-        if (fault != ch.reportedFault) {
-          message("joint %u idle fault: %s", ch.def->servoId, teleop::faultToString(fault));
-        }
+    const Fault fault = ch.supervisor.update(sample, ch.armed(), ch.goal, ch.reference, nowMs);
+
+    if (fault != Fault::None && !ch.armed()) {
+      // Torque on while the firmware has the joint off: switch it off again.
+      if (fault == Fault::TorqueMismatch) bus_.writeTorque(ch.def->servoId, false);
+      if (fault != ch.reportedFault) {
+        message("joint %u idle fault: %s", ch.def->servoId, teleop::faultToString(fault));
       }
     }
     ch.reportedFault = fault;
-  }
-
-  const Fault supply = supplySupervisor_.update(voltages, voltageCount, nowMs);
-  if (supply != Fault::None && pending == Fault::None) {
-    if (armed_) {
-      pending = supply;
-    } else if (supply != reportedSupplyFault_) {
-      message("idle fault: %s", teleop::faultToString(supply));
+    if (fault == Fault::None) continue;
+    if (teleop::faultScope(fault) == FaultScope::Hand) {
+      if (handFault == Fault::None) {
+        handFault = fault;
+        handJoint = i;
+      }
+    } else if (ch.armed()) {
+      jointFaults[i] = fault;
     }
+  }
+  if (n > 0) readCursor_ = static_cast<uint8_t>((readCursor_ + reads) % n);
+
+  // Bus silence on an armed joint; with round-robin a joint is read every ~30 ms.
+  float voltages[teleop::kMaxJoints];
+  uint8_t voltageCount = 0;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    const JointChannel& ch = channels_[i];
+    const uint32_t age = nowMs - ch.lastGoodReadMs;
+    if (ch.armed() && age > config::kServoCommStaleMs && handFault == Fault::None) {
+      handFault = Fault::CommLost;
+      handJoint = i;
+    }
+    if (ch.settings.enabled && age <= config::kServoCommStaleMs) voltages[voltageCount++] = ch.servo.voltage;
+  }
+  const Fault supply = supplySupervisor_.update(voltages, voltageCount, nowMs);
+  if (supply != Fault::None && handFault == Fault::None) {
+    handFault = supply;
+    handJoint = -1;
+  }
+  if (supply != reportedSupplyFault_ && supply != Fault::None && armedCount() == 0) {
+    message("idle fault: %s", teleop::faultToString(supply));
   }
   reportedSupplyFault_ = supply;
 
-  if (pending != Fault::None) disarmAll(pending, pendingJoint, teleop::faultToString(pending));
+  if (handFault != Fault::None && armedCount() > 0) {
+    disarmAll(handFault, handJoint, teleop::faultToString(handFault));
+    return;
+  }
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    if (jointFaults[i] != Fault::None) disarmJoint(i, jointFaults[i], teleop::faultToString(jointFaults[i]));
+  }
 }
 
-void TeleopController::stepStateMachine(float dt, uint32_t nowMs) {
-  bool anyEncFault = false;
-  int faultJoint = -1;
-  bool allFresh = true;
-  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
-    const JointChannel& ch = channels_[i];
-    if (!ch.active) continue;
-    if (ch.encBad >= config::kEncoderFailCycles && !anyEncFault) {
-      anyEncFault = true;
-      faultJoint = i;
-    }
-    allFresh &= ch.encFresh;
-  }
+void TeleopController::stepJoint(uint8_t index, float dt, uint32_t nowMs) {
+  JointChannel& ch = channels_[index];
+  const uint8_t id = ch.def->servoId;
+  const bool encFault = ch.encBad >= config::kEncoderFailCycles;
 
-  switch (state_) {
-    case TeleopState::Idle:
-      for (JointChannel& ch : channels_) {
-        if (!ch.settings.enabled || !ch.servoOk) continue;
+  switch (ch.state) {
+    case JointState::Off:
+      if (ch.readThisCycle && ch.servoOk) {
         ch.limiter.reset(ch.servo.position);
         ch.model.reset(ch.servo.position);
         ch.goal = ch.reference = ch.servo.position;
       }
       return;
 
-    case TeleopState::Align: {
-      if (anyEncFault) {
-        disarmAll(Fault::None, faultJoint, "encoder lost during ALIGN");
+    case JointState::Align:
+      if (encFault) {
+        disarmJoint(index, Fault::None, "encoder lost during ALIGN");
         return;
       }
-      bool aligned = true;
-      for (JointChannel& ch : channels_) {
-        if (!ch.active) continue;
-        ch.limiter.setTarget(ch.target);
-        ch.goal = ch.limiter.step(dt);
-        aligned &= fabsf(ch.goal - ch.target) <= config::kAlignTolerance;
-      }
-      if (aligned) {
-        state_ = TeleopState::Follow;
-        for (JointChannel& ch : channels_) {
-          if (ch.active) ch.limiter.setLimits(ch.settings.vmax, ch.settings.amax);
-        }
-        message("ALIGN done -> FOLLOW");
+      ch.limiter.setTarget(ch.target);
+      ch.goal = ch.limiter.step(dt);
+      if (fabsf(ch.goal - ch.target) <= config::kAlignTolerance) {
+        ch.state = JointState::Follow;
+        ch.limiter.setLimits(ch.settings.vmax, ch.settings.amax);
+        message("joint %u aligned -> FOLLOW", id);
       }
       break;
-    }
 
-    case TeleopState::Follow:
-      if (anyEncFault) {
-        state_ = TeleopState::Hold;
-        holdSinceMs_ = nowMs;
-        encGoodTiming_ = false;
-        for (JointChannel& ch : channels_) {
-          if (ch.active) ch.limiter.setTarget(ch.limiter.position());
-        }
-        message("joint %u encoder fault -> HOLD", channels_[faultJoint].def->servoId);
+    case JointState::Follow:
+      if (encFault) {
+        ch.state = JointState::Hold;
+        ch.holdSinceMs = nowMs;
+        ch.encGoodTiming = false;
+        ch.limiter.setTarget(ch.limiter.position());
+        message("joint %u encoder fault -> HOLD", id);
       } else {
-        for (JointChannel& ch : channels_) {
-          if (ch.active) ch.limiter.setTarget(ch.target);
-        }
+        ch.limiter.setTarget(ch.target);
       }
-      for (JointChannel& ch : channels_) {
-        if (ch.active) ch.goal = ch.limiter.step(dt);
-      }
+      ch.goal = ch.limiter.step(dt);
       break;
 
-    case TeleopState::Hold:
-      for (JointChannel& ch : channels_) {
-        if (ch.active) ch.goal = ch.limiter.step(dt);
-      }
-      if (allFresh) {
-        if (!encGoodTiming_) {
-          encGoodTiming_ = true;
-          encGoodSinceMs_ = nowMs;
-        } else if (nowMs - encGoodSinceMs_ >= config::kHoldRecoverMs) {
-          state_ = TeleopState::Align;
-          for (JointChannel& ch : channels_) {
-            if (ch.active) ch.limiter.setLimits(config::kArmSpeed, ch.settings.amax);
-          }
-          message("encoders back -> ALIGN");
+    case JointState::Hold:
+      ch.goal = ch.limiter.step(dt);
+      if (ch.encFresh) {
+        if (!ch.encGoodTiming) {
+          ch.encGoodTiming = true;
+          ch.encGoodSinceMs = nowMs;
+        } else if (nowMs - ch.encGoodSinceMs >= config::kHoldRecoverMs) {
+          ch.state = JointState::Align;
+          ch.limiter.setLimits(config::kArmSpeed, ch.settings.amax);
+          message("joint %u encoder back -> ALIGN", id);
           break;
         }
       } else {
-        encGoodTiming_ = false;
+        ch.encGoodTiming = false;
       }
-      if (nowMs - holdSinceMs_ > config::kHoldTimeoutMs) {
-        disarmAll(Fault::None, faultJoint, "encoder lost > 3 s");
+      if (nowMs - ch.holdSinceMs > config::kHoldTimeoutMs) {
+        disarmJoint(index, Fault::None, "encoder lost > 3 s");
         return;
       }
       break;
   }
 
   // Capability model for the tracking check: chases the goal at vsat.
-  for (JointChannel& ch : channels_) {
-    if (!ch.active) continue;
-    ch.model.setTarget(ch.goal);
-    ch.reference = ch.model.step(dt);
-  }
+  ch.model.setTarget(ch.goal);
+  ch.reference = ch.model.step(dt);
 }
 
-void TeleopController::writeGoals() {
+void TeleopController::writeGoals(uint32_t nowMs) {
   uint8_t ids[teleop::kMaxJoints];
   int16_t positions[teleop::kMaxJoints];
   uint16_t speeds[teleop::kMaxJoints];
   uint8_t n = 0;
   for (JointChannel& ch : channels_) {
     ch.goalSent = false;
-    // Only to armed joints whose torque we just read back as on: a goal write
+    // Only to armed joints whose torque a recent read showed on: a goal write
     // to a disarmed SCS0009 would switch its torque on by itself.
-    if (!armed_ || state_ == TeleopState::Idle || !ch.active || !ch.servoOk || !ch.servo.torqueOn) continue;
+    if (!ch.armed() || !ch.servo.torqueOn || nowMs - ch.lastGoodReadMs > config::kServoStaleMs) continue;
     ch.speedRegister = streamSpeed(ch.limiter.velocity());
     ids[n] = ch.def->servoId;
     positions[n] = static_cast<int16_t>(lroundf(ch.goal));
@@ -448,13 +459,32 @@ uint16_t TeleopController::streamSpeed(float velocity) const {
 // ---- commands -----------------------------------------------------------------
 
 void TeleopController::handleCommand(const Command& c) {
-  if (armed_ && teleop::requiresDisarmed(c)) {
-    message("refused while armed: disarm first");
+  if (armedCount() > 0 && teleop::requiresDisarmed(c)) {
+    message("refused while joints are armed: disarm first");
     return;
   }
   switch (c.verb) {
-    case Verb::Arm: arm(); break;
-    case Verb::Disarm: disarmAll(Fault::None, -1, "operator"); break;
+    case Verb::Arm:
+      if (c.joint == 0) {
+        armAll();
+      } else {
+        armOne(c.joint);
+      }
+      break;
+    case Verb::Disarm:
+      if (c.joint == 0) {
+        disarmAll(Fault::None, -1, "operator");
+      } else {
+        const int i = teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, c.joint);
+        if (i < 0) {
+          message("no joint with servo id %u", c.joint);
+        } else if (!channels_[i].armed()) {
+          message("joint %u is not armed", c.joint);
+        } else {
+          disarmJoint(i, Fault::None, "operator");
+        }
+      }
+      break;
     case Verb::Estop: torqueOffAll("E-stop (console)"); break;
     case Verb::Ping: pingAll(); break;
     case Verb::StatsReset:
@@ -625,7 +655,8 @@ bool TeleopController::loadConfig(bool atBoot) {
     message("configuration loaded with corrections: %s (first: joint %u)",
             teleop::blobStatusToString(status), config::kJoints[badJoint].servoId);
   } else {
-    message("configuration loaded with corrections: %s", teleop::blobStatusToString(status));
+    message("configuration loaded: %s; run `save` to store it in the new format",
+            teleop::blobStatusToString(status));
   }
   return true;
 }
@@ -655,125 +686,162 @@ void TeleopController::pingAll() {
 
 // ---- arming -------------------------------------------------------------------
 
-bool TeleopController::arm() {
-  if (armed_) {
-    message("already armed");
+bool TeleopController::preflight(uint8_t index, ServoState& st) {
+  JointChannel& ch = channels_[index];
+  const uint8_t id = ch.def->servoId;
+  if (!teleop::jointReady(ch.settings, *ch.def, config::kEncoderCount)) {
+    message("arm refused: joint %u %s", id, notReadyReason(ch.settings, *ch.def));
     return false;
   }
-  uint8_t enabled = 0;
-  ServoState states[teleop::kMaxJoints];
-  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
-    JointChannel& ch = channels_[i];
-    if (!ch.settings.enabled) continue;
-    ++enabled;
-    const uint8_t id = ch.def->servoId;
-    if (!teleop::jointReady(ch.settings, *ch.def, config::kEncoderCount)) {
-      message("arm refused: joint %u %s", id, notReadyReason(ch.settings, *ch.def));
-      return false;
-    }
-    if (!ch.encFresh) {
-      message("arm refused: joint %u encoder not healthy", id);
-      return false;
-    }
-    ServoState& st = states[i];
-    if (!bus_.readState(id, st)) {
-      message("arm refused: no status reply from servo %u", id);
-      return false;
-    }
-    if (st.errorByte != 0 || st.status != 0) {
-      message("arm refused: servo %u error byte 0x%02X status 0x%02X", id, st.errorByte, st.status);
-      return false;
-    }
-    if (st.position < ch.def->travelMin || st.position > ch.def->travelMax) {
-      message("arm refused: servo %u at %d outside travel [%d, %d]; move it back by hand", id,
-              st.position, ch.def->travelMin, ch.def->travelMax);
-      return false;
-    }
-  }
-  if (enabled == 0) {
-    message("arm refused: no joint enabled (set <j> on)");
+  if (!ch.encFresh) {
+    message("arm refused: joint %u encoder not healthy", id);
     return false;
   }
-
-  monitor_ = false;
-  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
-    JointChannel& ch = channels_[i];
-    if (!ch.settings.enabled) continue;
-    const uint8_t id = ch.def->servoId;
-    // Goal before torque: a goal write switches torque on by itself on SCS0009,
-    // so the joint may only ever be told to hold where it already is.
-    const int16_t hold = states[i].position;
-    ch.active = true;  // from here on, disarmAll() switches it off again
-    const char* problem = nullptr;
-    ServoState check;
-    if (!bus_.writeGoal(id, hold, config::kArmSpeed)) {
-      problem = "goal write failed";
-    } else if (!bus_.writeTorque(id, true)) {
-      problem = "torque write failed";
-    } else if (!bus_.readState(id, check)) {
-      problem = "no read-back after arming";
-    } else if (!check.torqueOn) {
-      problem = "torque did not switch on";
-    } else if (check.goal != hold) {
-      problem = "goal register does not match the hold position";
-    } else if (abs(check.position - hold) > config::kArmHoldTolerance) {
-      problem = "joint moved while arming";
-    }
-    if (problem != nullptr) {
-      disarmAll(Fault::None, i, problem);
-      return false;
-    }
-    ch.limiter.reset(hold);
-    ch.limiter.setLimits(config::kArmSpeed, ch.settings.amax);
-    ch.model.reset(hold);
-    ch.goal = ch.reference = hold;
-    ch.supervisor.reset();
+  if (!bus_.readState(id, st)) {
+    message("arm refused: no status reply from servo %u", id);
+    return false;
   }
-
-  armed_ = true;
-  state_ = TeleopState::Align;
-  supplySupervisor_.reset();
-  lastFault_ = Fault::None;
-  lastFaultJoint_ = 0;
-  message("armed %u joint(s), holding -> ALIGN (keep the glove still)", enabled);
+  if (st.errorByte != 0 || st.status != 0) {
+    message("arm refused: servo %u error byte 0x%02X status 0x%02X", id, st.errorByte, st.status);
+    return false;
+  }
+  if (st.position < ch.def->travelMin || st.position > ch.def->travelMax) {
+    message("arm refused: servo %u at %d outside travel [%d, %d]; move it back by hand", id,
+            st.position, ch.def->travelMin, ch.def->travelMax);
+    return false;
+  }
   return true;
 }
 
-void TeleopController::disarmAll(Fault fault, int jointIndex, const char* reason) {
-  armed_ = false;  // first, so no goal can follow
-  state_ = TeleopState::Idle;
-  uint8_t ids[teleop::kMaxJoints];
-  uint8_t n = 0;
-  for (const JointChannel& ch : channels_) {
-    if (ch.active || ch.settings.enabled) ids[n++] = ch.def->servoId;
+const char* TeleopController::armJoint(uint8_t index, const ServoState& st, uint32_t nowMs) {
+  JointChannel& ch = channels_[index];
+  const uint8_t id = ch.def->servoId;
+  // Goal before torque: a goal write switches torque on by itself on SCS0009,
+  // so the joint may only ever be told to hold where it already is.
+  const int16_t hold = st.position;
+  ServoState check;
+  if (!bus_.writeGoal(id, hold, config::kArmSpeed)) return "goal write failed";
+  if (!bus_.writeTorque(id, true)) return "torque write failed";
+  if (!bus_.readState(id, check)) return "no read-back after arming";
+  if (!check.torqueOn) return "torque did not switch on";
+  if (check.goal != hold) return "goal register does not match the hold position";
+  if (abs(check.position - hold) > config::kArmHoldTolerance) return "joint moved while arming";
+
+  ch.state = JointState::Align;
+  ch.lastFault = Fault::None;
+  ch.servo = check;
+  ch.servoOk = true;
+  ch.lastGoodReadMs = nowMs;
+  ch.limiter.reset(hold);
+  ch.limiter.setLimits(config::kArmSpeed, ch.settings.amax);
+  ch.model.reset(hold);
+  ch.goal = ch.reference = hold;
+  ch.supervisor.reset();
+  return nullptr;
+}
+
+void TeleopController::armAll() {
+  ServoState states[teleop::kMaxJoints];
+  uint8_t toArm = 0;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    JointChannel& ch = channels_[i];
+    if (!ch.settings.enabled || ch.armed()) continue;
+    if (!preflight(i, states[i])) return;
+    ++toArm;
   }
-  bool confirmed = true;
-  if (n > 0) {
-    bus_.syncTorqueOff(ids, n);
-    for (uint8_t i = 0; i < n; ++i) {
-      bus_.writeTorque(ids[i], false);
-      ServoState check;
-      confirmed &= bus_.readState(ids[i], check) && !check.torqueOn;
+  if (toArm == 0) {
+    message(armedCount() > 0 ? "every enabled joint is already armed"
+                             : "arm refused: no joint enabled (set <j> on)");
+    return;
+  }
+
+  monitor_ = false;
+  const uint32_t nowMs = millis();
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    JointChannel& ch = channels_[i];
+    if (!ch.settings.enabled || ch.armed()) continue;
+    const char* problem = armJoint(i, states[i], nowMs);
+    if (problem != nullptr) {
+      disarmAll(Fault::None, i, problem);
+      return;
     }
   }
-  for (JointChannel& ch : channels_) {
-    ch.active = false;
-    ch.supervisor.reset();
+  if (armedCount() == toArm) supplySupervisor_.reset();
+  lastHandFault_ = Fault::None;
+  message("armed %u joint(s), holding -> ALIGN (keep the glove still)", toArm);
+}
+
+void TeleopController::armOne(uint8_t servoId) {
+  const int i = teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
+  if (i < 0) {
+    message("no joint with servo id %u", servoId);
+    return;
   }
+  JointChannel& ch = channels_[i];
+  if (ch.armed()) {
+    message("joint %u is already armed", servoId);
+    return;
+  }
+  if (!ch.settings.enabled) {
+    message("arm refused: joint %u disabled (set %u on)", servoId, servoId);
+    return;
+  }
+  ServoState st;
+  if (!preflight(i, st)) return;
+  monitor_ = false;
+  const char* problem = armJoint(i, st, millis());
+  if (problem != nullptr) {
+    disarmJoint(i, Fault::None, problem);
+    return;
+  }
+  message("joint %u armed, holding -> ALIGN", servoId);
+}
+
+bool TeleopController::switchOff(const uint8_t* ids, uint8_t count) {
+  if (count == 0) return true;
+  bus_.syncTorqueOff(ids, count);
+  bool confirmed = true;
+  for (uint8_t i = 0; i < count; ++i) {
+    bus_.writeTorque(ids[i], false);
+    ServoState check;
+    confirmed &= bus_.readState(ids[i], check) && !check.torqueOn;
+  }
+  return confirmed;
+}
+
+void TeleopController::disarmJoint(uint8_t index, Fault fault, const char* reason) {
+  JointChannel& ch = channels_[index];
+  ch.state = JointState::Off;  // first, so no goal can follow
+  const uint8_t id = ch.def->servoId;
+  const bool confirmed = switchOff(&id, 1);
+  ch.supervisor.reset();
+  ch.lastFault = fault;
+  message("joint %u (%s) DISARM: %s; torque off %s; other joints unaffected", id, ch.def->name, reason,
+          confirmed ? "confirmed" : "NOT CONFIRMED");
+}
+
+void TeleopController::disarmAll(Fault fault, int jointIndex, const char* reason) {
+  uint8_t ids[teleop::kMaxJoints];
+  uint8_t n = 0;
+  for (JointChannel& ch : channels_) {
+    if (ch.armed() || ch.settings.enabled) ids[n++] = ch.def->servoId;
+    ch.state = JointState::Off;  // first, so no goal can follow
+  }
+  const bool confirmed = switchOff(ids, n);
+  for (JointChannel& ch : channels_) ch.supervisor.reset();
   torqueOffConfirmed_ = confirmed;
-  lastFault_ = fault;
-  lastFaultJoint_ = jointIndex >= 0 ? channels_[jointIndex].def->servoId : 0;
+  lastHandFault_ = fault;
   if (jointIndex >= 0) {
-    message("DISARM: %s (joint %u %s); torque off %s", reason, channels_[jointIndex].def->servoId,
+    channels_[jointIndex].lastFault = fault;
+    message("DISARM ALL: %s (joint %u %s); torque off %s", reason, channels_[jointIndex].def->servoId,
             channels_[jointIndex].def->name, confirmed ? "confirmed" : "NOT CONFIRMED");
   } else {
-    message("DISARM: %s; torque off %s", reason, confirmed ? "confirmed" : "NOT CONFIRMED");
+    message("DISARM ALL: %s; torque off %s", reason, confirmed ? "confirmed" : "NOT CONFIRMED");
   }
 }
 
 void TeleopController::torqueOffAll(const char* reason) {
-  armed_ = false;
-  state_ = TeleopState::Idle;
+  for (JointChannel& ch : channels_) ch.state = JointState::Off;
   uint8_t ids[teleop::kMaxJoints];
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) ids[i] = config::kJoints[i].servoId;
   bus_.syncTorqueOff(ids, teleop::kMaxJoints);
@@ -786,10 +854,7 @@ void TeleopController::torqueOffAll(const char* reason) {
       allConfirmed &= bus_.readState(id, check) && !check.torqueOn;
     }
   }
-  for (JointChannel& ch : channels_) {
-    ch.active = false;
-    ch.supervisor.reset();
-  }
+  for (JointChannel& ch : channels_) ch.supervisor.reset();
   torqueOffConfirmed_ = allConfirmed;
   message("%s: torque off on all servos%s", reason, allConfirmed ? "" : " (NOT CONFIRMED)");
 }
@@ -809,13 +874,12 @@ void TeleopController::publish() {
     }
   }
 
+  const uint32_t nowMs = millis();
   Snapshot& s = staging_;
   s.cycle = cycle_;
-  s.uptimeMs = millis();
-  s.state = state_;
-  s.armed = armed_;
-  s.lastFault = lastFault_;
-  s.lastFaultJoint = lastFaultJoint_;
+  s.uptimeMs = nowMs;
+  s.armedCount = armedCount();
+  s.lastHandFault = lastHandFault_;
   s.torqueOffConfirmed = torqueOffConfirmed_;
   s.echo = port_.echo();
   s.monitor = monitor_;
@@ -824,8 +888,9 @@ void TeleopController::publish() {
     const JointChannel& ch = channels_[i];
     JointSnapshot& j = s.joints[i];
     j.settings = ch.settings;
+    j.state = ch.state;
+    j.lastFault = ch.lastFault;
     j.ready = teleop::jointReady(ch.settings, *ch.def, config::kEncoderCount);
-    j.active = ch.active;
     j.refCaptured = ch.refCaptured;
     j.encFresh = ch.encFresh;
     j.encRaw = ch.encRaw;
@@ -837,6 +902,7 @@ void TeleopController::publish() {
     j.speedRegister = ch.speedRegister;
     j.goalSent = ch.goalSent;
     j.servoOk = ch.servoOk;
+    j.readAgeMs = nowMs - ch.lastGoodReadMs;
     j.servo = ch.servo;
     j.jumpRejects = ch.jumpRejects;
     s.monitorPosition[i] = monitorPosition_[i];

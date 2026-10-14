@@ -24,8 +24,8 @@ enum class Verb : uint8_t {
   StatsReset,
   Enc,
   Ping,
-  Arm,
-  Disarm,
+  Arm,       // joint 0 = every enabled joint
+  Disarm,    // joint 0 = every joint
   Estop,
   Joints,
   Monitor,   // flag = on/off

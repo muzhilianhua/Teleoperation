@@ -34,6 +34,14 @@ constexpr uint32_t kControlHz = 100;
 constexpr uint32_t kControlPeriodUs = 1000000UL / kControlHz;
 constexpr uint8_t kFullEncoderReadEvery = 10;  // AGC / diagnostics refresh
 constexpr uint32_t kWatchdogTimeoutS = 2;
+// Full status reads cost ~0.55 ms each; reading all 9 servos every cycle would
+// use half the period. Up to this many are read per cycle, round-robin.
+constexpr uint8_t kServoReadsPerCycle = 3;
+// A goal is written only if the joint's last good read (showing torque on) is
+// at most this old.
+constexpr uint32_t kServoStaleMs = 50;
+// An armed joint without a good read for this long is a lost bus ([bringup] stale_s).
+constexpr uint32_t kServoCommStaleMs = 100;
 constexpr uint8_t kControlCore = 1;
 constexpr uint8_t kConsoleCore = 0;
 

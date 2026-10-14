@@ -1,7 +1,8 @@
 // 100 Hz control loop over the joint table: encoder -> jump guard -> filter ->
-// map -> rate limit -> one SYNC_WRITE per cycle, with arming, the hand-level
-// IDLE/ALIGN/FOLLOW/HOLD state machine, safety supervision and the settings
-// (calibration) store.
+// map -> rate limit -> one SYNC_WRITE per cycle. Every joint has its own state
+// machine (OFF/ALIGN/FOLLOW/HOLD) so a joint-level fault only switches that
+// joint off; hand-level faults switch everything off. Also owns arming, safety
+// supervision and the settings (calibration) store.
 //
 // Only this task touches the servo bus, the encoder bus and NVS. The console
 // talks to it through a command queue (in) and a message queue plus snapshot
@@ -22,8 +23,8 @@
 
 #include "config.h"
 
-enum class TeleopState : uint8_t { Idle, Align, Follow, Hold };
-const char* teleopStateToString(TeleopState state);
+enum class JointState : uint8_t { Off, Align, Follow, Hold };
+const char* jointStateToString(JointState state);
 
 using Command = teleop::ParsedCommand;
 
@@ -55,8 +56,9 @@ struct EncoderSummary {
 
 struct JointSnapshot {
   teleop::JointSettings settings;
+  JointState state = JointState::Off;
+  teleop::Fault lastFault = teleop::Fault::None;  // what last switched this joint off
   bool ready = false;
-  bool active = false;       // armed in the current session
   bool refCaptured = false;  // `cal a` done (or exo calibrated)
   bool encFresh = false;
   uint16_t encRaw = 0;
@@ -67,7 +69,8 @@ struct JointSnapshot {
   float reference = 0.0f;          // servo-capability model used by the tracking check
   uint16_t speedRegister = 0;
   bool goalSent = false;
-  bool servoOk = false;
+  bool servoOk = false;            // last read attempt succeeded
+  uint32_t readAgeMs = 0;          // since the last good read
   ServoState servo;
   uint32_t jumpRejects = 0;
 };
@@ -75,10 +78,8 @@ struct JointSnapshot {
 struct Snapshot {
   uint32_t cycle = 0;
   uint32_t uptimeMs = 0;
-  TeleopState state = TeleopState::Idle;
-  bool armed = false;
-  teleop::Fault lastFault = teleop::Fault::None;
-  uint8_t lastFaultJoint = 0;  // servo id, 0 = hand-level
+  uint8_t armedCount = 0;
+  teleop::Fault lastHandFault = teleop::Fault::None;
   bool torqueOffConfirmed = true;
   bool echo = false;
   bool monitor = false;
@@ -120,22 +121,34 @@ class TeleopController {
     teleop::RateLimiter model;
     teleop::JumpGuard guard;
     teleop::JointSupervisor supervisor;
+    JointState state = JointState::Off;
+    teleop::Fault lastFault = teleop::Fault::None;
     bool refCaptured = false;
-    bool active = false;
+    // Encoder path
     uint8_t encBad = 0;
     bool encFresh = false;
     uint16_t encRaw = 0;
     float exoCounts = 0.0f;
     float exoFiltered = 0.0f;
     float target = 0.0f;
+    // Output path
     float goal = 0.0f;
     float reference = 0.0f;
     uint16_t speedRegister = 0;
     bool goalSent = false;
+    // Servo readings (round-robin)
     bool servoOk = false;
+    bool readThisCycle = false;
+    uint32_t lastGoodReadMs = 0;
     ServoState servo;
+    // Hold bookkeeping
+    uint32_t holdSinceMs = 0;
+    uint32_t encGoodSinceMs = 0;
+    bool encGoodTiming = false;
     teleop::Fault reportedFault = teleop::Fault::None;
     uint32_t jumpRejects = 0;
+
+    bool armed() const { return state != JointState::Off; }
   };
 
   static void taskEntry(void* arg);
@@ -147,8 +160,9 @@ class TeleopController {
   void processEncoder(JointChannel& ch, float dt);
   bool encoderSample(uint8_t index, uint16_t& raw) const;
   void readServos(uint32_t nowMs);
-  void stepStateMachine(float dt, uint32_t nowMs);
-  void writeGoals();
+  void readMonitor();
+  void stepJoint(uint8_t index, float dt, uint32_t nowMs);
+  void writeGoals(uint32_t nowMs);
 
   void handleCommand(const Command& command);
   void handleSet(const Command& command);
@@ -160,11 +174,17 @@ class TeleopController {
   void resetChannelRuntime(JointChannel& ch);
   void applyRuntimeParams(JointChannel& ch);
   JointChannel* channelForServo(uint8_t servoId);
+  uint8_t armedCount() const;
 
   void pingAll();
-  bool arm();
+  bool preflight(uint8_t index, ServoState& state);
+  const char* armJoint(uint8_t index, const ServoState& state, uint32_t nowMs);
+  void armAll();
+  void armOne(uint8_t servoId);
+  void disarmJoint(uint8_t index, teleop::Fault fault, const char* reason);
   void disarmAll(teleop::Fault fault, int jointIndex, const char* reason);
   void torqueOffAll(const char* reason);
+  bool switchOff(const uint8_t* ids, uint8_t count);
   uint16_t streamSpeed(float velocity) const;
   void publish();
   void message(const char* format, ...) __attribute__((format(printf, 2, 3)));
@@ -187,22 +207,16 @@ class TeleopController {
   teleop::GlobalSettings global_;
   teleop::SupplySupervisor supplySupervisor_;
 
-  TeleopState state_ = TeleopState::Idle;
-  bool armed_ = false;
   bool monitor_ = false;
   uint8_t monitorIndex_ = 0;
+  uint8_t readCursor_ = 0;
   int16_t monitorPosition_[teleop::kMaxJoints] = {0};
   bool monitorOk_[teleop::kMaxJoints] = {false};
-  teleop::Fault lastFault_ = teleop::Fault::None;
-  uint8_t lastFaultJoint_ = 0;
+  teleop::Fault lastHandFault_ = teleop::Fault::None;
   bool torqueOffConfirmed_ = true;
   teleop::Fault reportedSupplyFault_ = teleop::Fault::None;
 
   uint32_t cycle_ = 0;
-  uint32_t holdSinceMs_ = 0;
-  uint32_t encGoodSinceMs_ = 0;
-  bool encGoodTiming_ = false;
-
   TimingStats timing_;
   uint32_t jitterHistogram_[TimingStats::kBins] = {0};
   uint32_t lastWakeUs_ = 0;

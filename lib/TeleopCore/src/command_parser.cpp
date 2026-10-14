@@ -155,8 +155,8 @@ struct Simple {
 
 constexpr Simple kSimpleVerbs[] = {
     {"help", Verb::Help},   {"?", Verb::Help},         {"status", Verb::Status},
-    {"enc", Verb::Enc},     {"ping", Verb::Ping},      {"arm", Verb::Arm},
-    {"disarm", Verb::Disarm}, {"x", Verb::Estop},      {"joints", Verb::Joints},
+    {"enc", Verb::Enc},     {"ping", Verb::Ping},      {"x", Verb::Estop},
+    {"joints", Verb::Joints},
     {"save", Verb::Save},   {"load", Verb::Load},      {"defaults", Verb::Defaults},
     {"dump", Verb::Dump},
 };
@@ -209,6 +209,16 @@ const char* parseCommand(const char* line, ParsedCommand& out) {
     if (tk.n != 1) return "this command takes no arguments";
     out.verb = s.verb;
     return nullptr;
+  }
+  if (eq(cmd, "arm") || eq(cmd, "disarm")) {
+    const Verb verb = eq(cmd, "arm") ? Verb::Arm : Verb::Disarm;
+    long joint = 0;
+    if (tk.n == 1 || (tk.n == 2 && parseInt(tk.t[1], 1, 253, joint))) {
+      out.verb = verb;
+      out.joint = static_cast<uint8_t>(joint);
+      return nullptr;
+    }
+    return verb == Verb::Arm ? "usage: arm [<joint>]" : "usage: disarm [<joint>]";
   }
   if (eq(cmd, "stats")) {
     if (tk.n == 1) {
