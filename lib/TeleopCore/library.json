@@ -1,0 +1,7 @@
+{
+  "name": "TeleopCore",
+  "version": "0.1.0",
+  "description": "Hardware-independent teleoperation logic: joint mapping, filtering, rate limiting, safety supervision",
+  "frameworks": "*",
+  "platforms": "*"
+}

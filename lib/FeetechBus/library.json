@@ -1,0 +1,8 @@
+{
+  "name": "FeetechBus",
+  "version": "0.1.0",
+  "description": "Feetech bus servo transport and series backends for ESP32 Arduino",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": [{ "name": "FeetechProtocol" }]
+}

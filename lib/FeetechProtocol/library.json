@@ -1,0 +1,7 @@
+{
+  "name": "FeetechProtocol",
+  "version": "0.1.0",
+  "description": "Hardware-independent Feetech bus servo packet codec",
+  "frameworks": "*",
+  "platforms": "*"
+}

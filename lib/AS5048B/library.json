@@ -1,0 +1,9 @@
+{
+  "name": "AS5048B",
+  "version": "0.1.0",
+  "description": "I2C driver for the ams AS5048B 14-bit magnetic rotary encoder",
+  "keywords": "as5048b, encoder, magnetic, i2c",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": [{ "name": "Wire" }]
+}
