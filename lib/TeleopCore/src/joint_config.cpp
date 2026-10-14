@@ -26,15 +26,17 @@ JointSettings defaultSettings(const JointDefaults& d) {
 }
 
 bool servoCalibrated(const JointSettings& s, const JointDefaults& d) {
-  return s.servoA != s.servoB && inRange(s.servoA, d.travelMin, d.travelMax) &&
+  return travelDefined(d) && s.servoA != s.servoB && inRange(s.servoA, d.travelMin, d.travelMax) &&
          inRange(s.servoB, d.travelMin, d.travelMax);
 }
 
 bool jointReady(const JointSettings& s, const JointDefaults& d, uint8_t encoderCount) {
-  return s.enabled && s.encoderIndex < encoderCount && exoCalibrated(s) && servoCalibrated(s, d);
+  return travelDefined(d) && s.enabled && s.encoderIndex < encoderCount && exoCalibrated(s) &&
+         servoCalibrated(s, d);
 }
 
 const char* validateJoint(const JointSettings& s, const JointDefaults& d, uint8_t encoderCount) {
+  if (!travelDefined(d) && s.enabled) return "travel not defined in config.h: joint cannot be enabled";
   if (s.encoderIndex != kNoEncoder && s.encoderIndex >= encoderCount) return "encoder index out of range";
   if (s.exoRef >= kEncoderCounts) return "exo reference out of range";
   if (s.exoB != 0 && abs(s.exoB) < kMinExoSpanCounts) return "exo span below 4 deg";

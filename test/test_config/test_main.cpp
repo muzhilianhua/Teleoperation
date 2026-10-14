@@ -19,7 +19,50 @@ const JointDefaults kDefaults[kMaxJoints] = {
     {6, "thumb_mcp_rot", 300, 700, 690, 365, 8000, kNoEncoder, false},
     {7, "thumb_mcp", 650, 900, 400, 50, 8000, kNoEncoder, false},
     {8, "thumb_ip", 20, 280, 380, 230, 8000, kNoEncoder, false},
+    {9, "joint9", 0, 0, 400, 50, 8000, kNoEncoder, false},  // travel not measured yet
 };
+
+// Version 1 layout (8 joints), as written by the M1 firmware.
+size_t packV1(const JointSettings* joints, const GlobalSettings& g, uint8_t backend, uint8_t* out) {
+  size_t n = 0;
+  auto u8 = [&](uint8_t v) { out[n++] = v; };
+  auto u16 = [&](uint16_t v) {
+    u8(static_cast<uint8_t>(v & 0xFF));
+    u8(static_cast<uint8_t>(v >> 8));
+  };
+  auto u32 = [&](uint32_t v) {
+    u16(static_cast<uint16_t>(v & 0xFFFF));
+    u16(static_cast<uint16_t>(v >> 16));
+  };
+  auto f32 = [&](float v) {
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    u32(bits);
+  };
+  u32(kBlobMagic);
+  u16(1);
+  u8(backend);
+  u8(kV1JointCount);
+  for (uint8_t i = 0; i < kV1JointCount; ++i) {
+    const JointSettings& s = joints[i];
+    u8(s.enabled ? 1 : 0);
+    u8(s.encoderIndex);
+    u16(s.exoRef);
+    u16(static_cast<uint16_t>(s.exoB));
+    u16(static_cast<uint16_t>(s.servoA));
+    u16(static_cast<uint16_t>(s.servoB));
+    u16(s.vmax);
+    u16(s.amax);
+    u16(s.vsat);
+    u16(s.trackSteps);
+  }
+  f32(g.leadMs);
+  f32(g.minCutoffHz);
+  f32(g.beta);
+  f32(g.jumpDeg);
+  u32(crc32(out, n));
+  return n;
+}
 
 void loadDefaults(JointSettings* joints) {
   for (uint8_t i = 0; i < kMaxJoints; ++i) joints[i] = defaultSettings(kDefaults[i]);
@@ -126,7 +169,7 @@ void test_blob_round_trip() {
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
   TEST_ASSERT_EQUAL(kBlobSize, packConfig(joints, kMaxJoints, g, ServoBackend::Scs, blob, sizeof(blob)));
-  TEST_ASSERT_EQUAL(172, kBlobSize);
+  TEST_ASSERT_EQUAL(190, kBlobSize);
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
@@ -199,6 +242,59 @@ void test_blob_invalid_joint_reset_to_defaults() {
   TEST_ASSERT_EQUAL(1, bad);
   assertJointsEqual(defaultSettings(kDefaults[1]), out[1]);
   assertJointsEqual(joints[0], out[0]);
+}
+
+void test_blob_v1_migrates_and_keeps_calibration() {
+  JointSettings joints[kMaxJoints];
+  GlobalSettings g;
+  configureSample(joints, g);
+  uint8_t blob[blobSizeFor(kV1JointCount)];
+  TEST_ASSERT_EQUAL(172, packV1(joints, g, static_cast<uint8_t>(ServoBackend::Scs), blob));
+
+  JointSettings out[kMaxJoints];
+  GlobalSettings og;
+  TEST_ASSERT_EQUAL(BlobStatus::Migrated, unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults,
+                                                       kMaxJoints, kEncoders, GlobalSettings(), out, og));
+  TEST_ASSERT_TRUE(blobApplied(BlobStatus::Migrated));
+  for (uint8_t i = 0; i < kV1JointCount; ++i) assertJointsEqual(joints[i], out[i]);
+  assertJointsEqual(defaultSettings(kDefaults[8]), out[8]);
+  TEST_ASSERT_EQUAL_FLOAT(80.0f, og.leadMs);
+}
+
+void test_blob_v1_with_wrong_size_rejected() {
+  JointSettings joints[kMaxJoints];
+  GlobalSettings g;
+  configureSample(joints, g);
+  uint8_t blob[kBlobSize];
+  packV1(joints, g, static_cast<uint8_t>(ServoBackend::Scs), blob);
+  JointSettings out[kMaxJoints];
+  GlobalSettings og;
+  // A v1 header with a v2-sized buffer must not be read past its CRC.
+  TEST_ASSERT_EQUAL(BlobStatus::BadSize, unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults,
+                                                      kMaxJoints, kEncoders, GlobalSettings(), out, og));
+}
+
+void test_undefined_travel_blocks_joint() {
+  const JointDefaults& d = kDefaults[8];
+  TEST_ASSERT_FALSE(travelDefined(d));
+  JointSettings s = defaultSettings(d);
+  TEST_ASSERT_NULL(validateJoint(s, d, kEncoders));  // default (disabled) is fine
+  s.enabled = true;
+  TEST_ASSERT_NOT_NULL(validateJoint(s, d, kEncoders));
+  s = defaultSettings(d);
+  s.servoA = 10;
+  s.servoB = 20;
+  TEST_ASSERT_NOT_NULL(validateJoint(s, d, kEncoders));
+
+  JointSettings joints[kMaxJoints];
+  loadDefaults(joints);
+  GlobalSettings g;
+  ParsedCommand c;
+  parseCommand("set 9 on", c);
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 9 enc 8", c);  // assigning an encoder is allowed, for monitoring
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_FALSE(jointReady(joints[8], d, kEncoders));
 }
 
 // ---- parser --------------------------------------------------------------------
@@ -339,6 +435,9 @@ int main() {
   RUN_TEST(test_blob_rejects_corruption_without_touching_output);
   RUN_TEST(test_blob_backend_mismatch_clears_servo_endpoints);
   RUN_TEST(test_blob_invalid_joint_reset_to_defaults);
+  RUN_TEST(test_blob_v1_migrates_and_keeps_calibration);
+  RUN_TEST(test_blob_v1_with_wrong_size_rejected);
+  RUN_TEST(test_undefined_travel_blocks_joint);
   RUN_TEST(test_parse_basic_commands);
   RUN_TEST(test_parse_set_commands);
   RUN_TEST(test_parse_errors);

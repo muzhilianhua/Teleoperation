@@ -25,9 +25,6 @@ constexpr int kServoTxPin = 17;
 constexpr uint32_t kServoBaud = 1000000;  // [bringup] SERVO_BAUDRATE
 constexpr uint32_t kServoLatencyUs = 2000;
 constexpr uint8_t kEchoProbeId = 253;     // [bringup] diagnose S2 probe id, must be unused
-// Every servo on the hand; all of them get torque-off at boot and on E-stop.
-constexpr uint8_t kHandServoIds[] = {1, 2, 3, 4, 5, 6, 7, 8};
-constexpr uint8_t kHandServoCount = sizeof(kHandServoIds);
 
 // ---- E-stop: BOOT button on the DevKit, active low ------------------------
 constexpr int kEstopPin = 0;
@@ -48,8 +45,13 @@ constexpr uint8_t kConsoleCore = 0;
 // sweeps. Joints 3/4/5/7 are force-limited (friction / tendon preload, 2-10
 // steps/s): their values are placeholders until the mechanics are fixed, and
 // their tracking check will trip until then.
+// Joint 9 was added after servo_bringup; travel 0/0 means "not defined": the
+// joint can be monitored but not enabled, calibrated, swept or armed until
+// its travel is measured (monitor, move by hand, ~15 steps margin) and
+// entered here. Its name is a placeholder too.
 // Encoder assignment and enable flags below are only boot defaults; the
 // operator sets them with `set <j> enc/on` and stores them in NVS.
+// All servos on the bus get torque-off at boot and on E-stop.
 constexpr uint16_t kAcceleration = 8000;  // steps/s^2
 inline constexpr teleop::JointDefaults kJoints[teleop::kMaxJoints] = {
     // id  name             min  max  vmax vsat amax           encoder            enabled
@@ -61,6 +63,7 @@ inline constexpr teleop::JointDefaults kJoints[teleop::kMaxJoints] = {
     {6, "thumb_mcp_rot",   300, 700, 690, 365, kAcceleration, teleop::kNoEncoder, false},
     {7, "thumb_mcp",       650, 900, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
     {8, "thumb_ip",         20, 280, 380, 230, kAcceleration, teleop::kNoEncoder, false},
+    {9, "joint9",            0,   0, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
 };
 constexpr teleop::ServoBackend kServoBackend = teleop::ServoBackend::Scs;
 

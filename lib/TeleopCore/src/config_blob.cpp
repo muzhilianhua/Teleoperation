@@ -63,6 +63,7 @@ const char* blobStatusToString(BlobStatus status) {
     case BlobStatus::BadVersion: return "unsupported version";
     case BlobStatus::BadCrc: return "CRC mismatch";
     case BlobStatus::BadJointCount: return "joint count mismatch";
+    case BlobStatus::Migrated: return "migrated from version 1: new joints set to defaults";
     case BlobStatus::BackendMismatch: return "saved for another servo series: servo endpoints cleared";
     case BlobStatus::InvalidJoint: return "invalid joint settings reset to defaults";
     case BlobStatus::InvalidGlobal: return "invalid global settings reset to defaults";
@@ -71,8 +72,9 @@ const char* blobStatusToString(BlobStatus status) {
 }
 
 bool blobApplied(BlobStatus status) {
-  return status == BlobStatus::Ok || status == BlobStatus::BackendMismatch ||
-         status == BlobStatus::InvalidJoint || status == BlobStatus::InvalidGlobal;
+  return status == BlobStatus::Ok || status == BlobStatus::Migrated ||
+         status == BlobStatus::BackendMismatch || status == BlobStatus::InvalidJoint ||
+         status == BlobStatus::InvalidGlobal;
 }
 
 uint32_t crc32(const uint8_t* data, size_t length) {
@@ -117,17 +119,28 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, ServoBackend backend,
                         const JointDefaults* defaults, uint8_t count, uint8_t encoderCount,
                         const GlobalSettings& globalDefaults, JointSettings* joints,
                         GlobalSettings& global, uint8_t* firstInvalidJoint) {
-  if (in == nullptr || length != kBlobSize) return BlobStatus::BadSize;
+  if (in == nullptr || length < 8) return BlobStatus::BadSize;
+  if (count != kMaxJoints) return BlobStatus::BadJointCount;
   Reader r(in);
   if (r.u32() != kBlobMagic) return BlobStatus::BadMagic;
-  if (r.u16() != kBlobVersion) return BlobStatus::BadVersion;
-  Reader crcReader(in + kBlobSize - 4);
-  if (crcReader.u32() != crc32(in, kBlobSize - 4)) return BlobStatus::BadCrc;
+  const uint16_t version = r.u16();
+  uint8_t savedCount = 0;
+  if (version == kBlobVersion) {
+    savedCount = kMaxJoints;
+  } else if (version == 1) {
+    savedCount = kV1JointCount;
+  } else {
+    return BlobStatus::BadVersion;
+  }
+  if (length != blobSizeFor(savedCount)) return BlobStatus::BadSize;
+  Reader crcReader(in + length - 4);
+  if (crcReader.u32() != crc32(in, length - 4)) return BlobStatus::BadCrc;
   const uint8_t savedBackend = r.u8();
-  if (r.u8() != count || count != kMaxJoints) return BlobStatus::BadJointCount;
+  if (r.u8() != savedCount) return BlobStatus::BadJointCount;
 
   JointSettings loaded[kMaxJoints];
-  for (uint8_t i = 0; i < count; ++i) {
+  for (uint8_t i = savedCount; i < count; ++i) loaded[i] = defaultSettings(defaults[i]);
+  for (uint8_t i = 0; i < savedCount; ++i) {
     JointSettings& s = loaded[i];
     s.enabled = r.u8() != 0;
     s.encoderIndex = r.u8();
@@ -146,7 +159,7 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, ServoBackend backend,
   g.beta = r.f32();
   g.jumpDeg = r.f32();
 
-  BlobStatus status = BlobStatus::Ok;
+  BlobStatus status = savedCount < count ? BlobStatus::Migrated : BlobStatus::Ok;
   if (savedBackend != static_cast<uint8_t>(backend)) {
     status = BlobStatus::BackendMismatch;
     for (uint8_t i = 0; i < count; ++i) loaded[i].servoA = loaded[i].servoB = defaults[i].travelMin;

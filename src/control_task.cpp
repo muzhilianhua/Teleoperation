@@ -17,6 +17,7 @@ namespace {
 constexpr float kModelAcceleration = 20000.0f;
 
 const char* notReadyReason(const teleop::JointSettings& s, const teleop::JointDefaults& d) {
+  if (!teleop::travelDefined(d)) return "travel not defined in config.h";
   if (!s.enabled) return "disabled";
   if (s.encoderIndex >= config::kEncoderCount) return "no encoder assigned (set <j> enc <n>)";
   if (!teleop::exoCalibrated(s)) return "exo not calibrated (cal <j> a / b)";
@@ -560,6 +561,10 @@ void TeleopController::handleCalHand(const Command& c) {
     message("no joint with servo id %u", c.joint);
     return;
   }
+  if (!teleop::travelDefined(*ch->def)) {
+    message("joint %u: travel not defined in config.h; measure it with `monitor on` first", c.joint);
+    return;
+  }
   ServoState st;
   if (!bus_.readState(c.joint, st)) {
     message("joint %u: no reply from servo", c.joint);
@@ -769,10 +774,11 @@ void TeleopController::disarmAll(Fault fault, int jointIndex, const char* reason
 void TeleopController::torqueOffAll(const char* reason) {
   armed_ = false;
   state_ = TeleopState::Idle;
-  bus_.syncTorqueOff(config::kHandServoIds, config::kHandServoCount);
+  uint8_t ids[teleop::kMaxJoints];
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) ids[i] = config::kJoints[i].servoId;
+  bus_.syncTorqueOff(ids, teleop::kMaxJoints);
   bool allConfirmed = true;
-  for (uint8_t i = 0; i < config::kHandServoCount; ++i) {
-    const uint8_t id = config::kHandServoIds[i];
+  for (const uint8_t id : ids) {
     ServoState check;
     if (!bus_.readState(id, check)) continue;  // absent servo: nothing to switch off
     if (check.torqueOn) {

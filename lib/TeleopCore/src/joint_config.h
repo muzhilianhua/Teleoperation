@@ -13,7 +13,7 @@
 
 namespace teleop {
 
-constexpr uint8_t kMaxJoints = 8;
+constexpr uint8_t kMaxJoints = 9;
 constexpr uint8_t kNoEncoder = 0xFF;
 constexpr int32_t kMinExoSpanCounts = 182;  // 4 deg
 
@@ -54,6 +54,8 @@ struct GlobalSettings {
 
 JointSettings defaultSettings(const JointDefaults& defaults);
 
+// Travel min >= max marks a joint whose limits have not been measured yet.
+inline bool travelDefined(const JointDefaults& d) { return d.travelMin < d.travelMax; }
 inline bool exoCalibrated(const JointSettings& s) { return s.exoB != 0; }
 bool servoCalibrated(const JointSettings& s, const JointDefaults& d);
 bool jointReady(const JointSettings& s, const JointDefaults& d, uint8_t encoderCount);
