@@ -506,6 +506,8 @@ void TeleopController::handleCommand(const Command& c) {
     case Verb::Save: saveConfig(); break;
     case Verb::Load: loadConfig(false); break;
     case Verb::Defaults: loadDefaults(); break;
+    case Verb::LimitsCheck: handleLimitsCheck(); break;
+    case Verb::LimitsWrite: handleLimitsWrite(c.joint); break;
     default: break;  // console-only verbs never reach the controller
   }
 }
@@ -613,6 +615,52 @@ void TeleopController::handleCalHand(const Command& c) {
   (c.flag ? ch->settings.servoB : ch->settings.servoA) = st.position;
   message("joint %u: servo %c = %d%s", c.joint, c.flag ? 'B' : 'A', st.position,
           ch->settings.servoA == ch->settings.servoB ? " (A = B: capture the other end)" : "");
+}
+
+void TeleopController::handleLimitsCheck() {
+  uint8_t mismatches = 0;
+  for (const JointChannel& ch : channels_) {
+    const uint8_t id = ch.def->servoId;
+    int16_t lo = 0, hi = 0;
+    if (!bus_.readAngleLimits(id, lo, hi)) {
+      message("limits j%u %-13s no reply", id, ch.def->name);
+      continue;
+    }
+    if (!teleop::travelDefined(*ch.def)) {
+      message("limits j%u %-13s servo %4d..%-4d  travel undefined", id, ch.def->name, lo, hi);
+      continue;
+    }
+    const bool match = lo == ch.def->travelMin && hi == ch.def->travelMax;
+    mismatches += match ? 0 : 1;
+    message("limits j%u %-13s servo %4d..%-4d  travel %4d..%-4d  %s", id, ch.def->name, lo, hi,
+            ch.def->travelMin, ch.def->travelMax, match ? "ok" : "MISMATCH");
+  }
+  message(mismatches ? "%u mismatch(es): `limits write all` syncs them" : "all defined joints match",
+          mismatches);
+}
+
+void TeleopController::handleLimitsWrite(uint8_t servoId) {
+  for (const JointChannel& ch : channels_) {
+    const uint8_t id = ch.def->servoId;
+    if (servoId != 0 && id != servoId) continue;
+    if (!teleop::travelDefined(*ch.def)) {
+      message("limits j%u: travel undefined in config.h, skipped", id);
+      continue;
+    }
+    int16_t lo = 0, hi = 0;
+    if (!bus_.readAngleLimits(id, lo, hi)) {
+      message("limits j%u: no reply, skipped", id);
+      continue;
+    }
+    if (lo == ch.def->travelMin && hi == ch.def->travelMax) {
+      if (servoId != 0) message("limits j%u: already %d..%d, nothing written", id, lo, hi);
+      continue;  // EEPROM is only written when it differs
+    }
+    const bool ok = bus_.writeAngleLimits(id, ch.def->travelMin, ch.def->travelMax);
+    message("limits j%u: %d..%d -> %d..%d %s", id, lo, hi, ch.def->travelMin, ch.def->travelMax,
+            ok ? "written and verified" : "FAILED (torque must be off; check the bus)");
+  }
+  if (servoId != 0 && channelForServo(servoId) == nullptr) message("no joint with servo id %u", servoId);
 }
 
 void TeleopController::saveConfig() {

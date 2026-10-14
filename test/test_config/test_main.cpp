@@ -332,6 +332,20 @@ void test_parse_basic_commands() {
   TEST_ASSERT_FALSE(c.flag);
 }
 
+void test_parse_limits_commands() {
+  ParsedCommand c;
+  TEST_ASSERT_NULL(parseCommand("limits check", c));
+  TEST_ASSERT_EQUAL(Verb::LimitsCheck, c.verb);
+  TEST_ASSERT_NULL(parseCommand("limits write all", c));
+  TEST_ASSERT_EQUAL(Verb::LimitsWrite, c.verb);
+  TEST_ASSERT_EQUAL(0, c.joint);
+  TEST_ASSERT_TRUE(requiresDisarmed(c));
+  TEST_ASSERT_NULL(parseCommand("limits write 7", c));
+  TEST_ASSERT_EQUAL(7, c.joint);
+  TEST_ASSERT_NOT_NULL(parseCommand("limits write", c));
+  TEST_ASSERT_NOT_NULL(parseCommand("limits erase all", c));
+}
+
 void test_parse_set_commands() {
   ParsedCommand c;
   TEST_ASSERT_NULL(parseCommand("set 2 enc none", c));
@@ -448,6 +462,7 @@ int main() {
   RUN_TEST(test_undefined_travel_blocks_joint);
   RUN_TEST(test_parse_basic_commands);
   RUN_TEST(test_parse_set_commands);
+  RUN_TEST(test_parse_limits_commands);
   RUN_TEST(test_parse_errors);
   RUN_TEST(test_requires_disarmed);
   RUN_TEST(test_apply_validates_and_is_atomic);

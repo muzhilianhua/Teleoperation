@@ -37,6 +37,8 @@ enum class Verb : uint8_t {
   Load,
   Defaults,
   Dump,
+  LimitsCheck,
+  LimitsWrite,  // joint 0 = all joints
 };
 
 enum class SetKey : uint8_t {

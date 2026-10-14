@@ -12,6 +12,8 @@ constexpr Endian kEndian = Endian::Big;
 
 // SCS register map (servo_bringup registers.py)
 constexpr uint8_t kRegModel = 3;           // 2 bytes
+constexpr uint8_t kRegAngleLimits = 9;     // min (9..10) and max (11..12), EEPROM
+constexpr uint8_t kRegLock = 48;           // 0 = EEPROM writable, 1 = locked
 constexpr uint8_t kRegTorqueEnable = 40;   // 1 byte
 constexpr uint8_t kRegGoalBlock = 42;      // position, time, speed (2 bytes each)
 constexpr uint8_t kGoalBlockLength = 6;
@@ -123,6 +125,34 @@ void ScsBus::syncWriteGoal(const uint8_t* ids, const int16_t* positions, const u
   const size_t n = feetech::buildSyncWrite(packet, sizeof(packet), kRegGoalBlock,
                                            kGoalBlockLength, ids, data, count);
   if (n > 0) port_.send(packet, n);
+}
+
+bool ScsBus::readAngleLimits(uint8_t id, int16_t& lo, int16_t& hi) {
+  uint8_t raw[4];
+  if (!readRegisters(id, kRegAngleLimits, sizeof(raw), raw, nullptr)) return false;
+  lo = static_cast<int16_t>(feetech::get16(raw, kEndian));
+  hi = static_cast<int16_t>(feetech::get16(raw + 2, kEndian));
+  return true;
+}
+
+bool ScsBus::writeAngleLimits(uint8_t id, int16_t lo, int16_t hi) {
+  // min = max = 0 would switch the servo to wheel (continuous rotation) mode.
+  if (lo < positionMin() || hi > positionMax() || lo >= hi) return false;
+  uint8_t torque = 0;
+  if (!readRegisters(id, kRegTorqueEnable, 1, &torque, nullptr) || torque != 0) return false;
+
+  uint8_t data[4];
+  feetech::put16(data, static_cast<uint16_t>(lo), kEndian);
+  feetech::put16(data + 2, static_cast<uint16_t>(hi), kEndian);
+  const uint8_t unlock = 0;
+  const uint8_t lock = 1;
+  // Same sequence as servo_bringup tune_servo: unlock, write, re-lock, read back.
+  if (!writeRegisters(id, kRegLock, &unlock, 1)) return false;
+  const bool written = writeRegisters(id, kRegAngleLimits, data, sizeof(data));
+  delay(10);  // EEPROM commit before the lock write and read-back
+  const bool locked = writeRegisters(id, kRegLock, &lock, 1);
+  int16_t checkLo = 0, checkHi = 0;
+  return written && locked && readAngleLimits(id, checkLo, checkHi) && checkLo == lo && checkHi == hi;
 }
 
 bool ScsBus::writeGoal(uint8_t id, int16_t position, uint16_t speed) {

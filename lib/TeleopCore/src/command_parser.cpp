@@ -220,6 +220,19 @@ const char* parseCommand(const char* line, ParsedCommand& out) {
     }
     return verb == Verb::Arm ? "usage: arm [<joint>]" : "usage: disarm [<joint>]";
   }
+  if (eq(cmd, "limits")) {
+    long joint = 0;
+    if (tk.n == 2 && eq(tk.t[1], "check")) {
+      out.verb = Verb::LimitsCheck;
+      return nullptr;
+    }
+    if (tk.n == 3 && eq(tk.t[1], "write") && (eq(tk.t[2], "all") || parseInt(tk.t[2], 1, 253, joint))) {
+      out.verb = Verb::LimitsWrite;
+      out.joint = static_cast<uint8_t>(joint);
+      return nullptr;
+    }
+    return "usage: limits check  or  limits write <joint|all>";
+  }
   if (eq(cmd, "stats")) {
     if (tk.n == 1) {
       out.verb = Verb::Stats;
@@ -284,6 +297,8 @@ bool requiresDisarmed(const ParsedCommand& c) {
     case Verb::Load:
     case Verb::Defaults:
     case Verb::Ping:
+    case Verb::LimitsCheck:  // reads all servos at once: too long for an armed cycle
+    case Verb::LimitsWrite:
       return true;
     case Verb::Monitor:
       return c.flag;

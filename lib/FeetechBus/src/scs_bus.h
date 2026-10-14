@@ -22,6 +22,8 @@ class ScsBus : public ServoBus {
   void syncWriteGoal(const uint8_t* ids, const int16_t* positions, const uint16_t* speeds,
                      uint8_t count) override;
   bool writeGoal(uint8_t id, int16_t position, uint16_t speed) override;
+  bool readAngleLimits(uint8_t id, int16_t& lo, int16_t& hi) override;
+  bool writeAngleLimits(uint8_t id, int16_t lo, int16_t hi) override;
 
  private:
   bool readRegisters(uint8_t id, uint8_t address, uint8_t length, uint8_t* out, uint8_t* error);

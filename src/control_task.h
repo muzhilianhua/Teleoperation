@@ -168,6 +168,8 @@ class TeleopController {
   void handleSet(const Command& command);
   void handleCal(const Command& command);
   void handleCalHand(const Command& command);
+  void handleLimitsCheck();
+  void handleLimitsWrite(uint8_t servoId);
   void saveConfig();
   bool loadConfig(bool atBoot);
   void loadDefaults();

@@ -116,6 +116,7 @@ void Console::printHelp() {
       "  set <j> vmax|amax|vsat|trk <n>             per-joint speed / tracking parameters\n"
       "  set lead|mincut|beta|jump <v>              global parameters\n"
       "  save | load | defaults | dump              NVS store / reload / reset (RAM) / export\n"
+      "  limits check | limits write <j|all>        servo angle-limit registers vs travel (disarmed)\n"
       "  plot <j> on | plot off                     Teleplot traces at 50 Hz");
 }
 
