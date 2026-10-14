@@ -43,7 +43,7 @@ void Console::drainMessages() {
 
 void Console::run() {
   Serial.println();
-  Serial.println("Teleoperation M1 ready. Type `help`.");
+  Serial.println("Teleoperation M2 ready. Type `help`.");
   for (;;) {
     drainMessages();
     while (Serial.available() > 0) {

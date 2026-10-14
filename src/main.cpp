@@ -1,6 +1,6 @@
-// Exoskeleton -> dexterous hand teleoperation, milestone M1:
-// joint table for the 8 hand servos, console calibration stored in NVS,
-// per-joint speed limits.
+// Exoskeleton -> dexterous hand teleoperation, milestone M2:
+// 9-joint hand with per-joint state machines and fault isolation, console
+// calibration stored in NVS, on-device speed sweep, grip force limiting.
 
 #include <Arduino.h>
 #include <AS5048B.h>
