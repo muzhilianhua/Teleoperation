@@ -20,7 +20,8 @@ const char* faultToString(Fault fault) {
   return "?";
 }
 
-Fault JointSupervisor::update(const ServoSample& s, bool armed, float setpoint, uint32_t nowMs) {
+Fault JointSupervisor::update(const ServoSample& s, bool armed, float goal, float reference,
+                              uint32_t nowMs) {
   if (!s.readOk) {
     if (failures_ < 0xFF) ++failures_;
     return failures_ >= config_.commFailCount ? Fault::CommLost : Fault::None;
@@ -36,9 +37,9 @@ Fault JointSupervisor::update(const ServoSample& s, bool armed, float setpoint, 
   const bool trip = loadTrip_.update(load >= config_.loadTripPct, nowMs, config_.loadTripMs);
   const bool hot = overheat_.update(s.temperatureC >= config_.temperatureTripC, nowMs,
                                     config_.temperatureTripMs);
+  const float lag = fabsf(goal - s.position) - fabsf(goal - reference);
   const bool lagging =
-      armed && tracking_.update(fabsf(s.position - setpoint) > config_.trackingErrorSteps, nowMs,
-                                config_.trackingErrorMs);
+      armed && tracking_.update(lag > config_.trackingErrorSteps, nowMs, config_.trackingErrorMs);
   if (!armed) tracking_.reset();
 
   if (hard) return Fault::LoadHard;

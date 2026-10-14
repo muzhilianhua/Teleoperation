@@ -1,4 +1,5 @@
 #include <joint_map.h>
+#include <jump_guard.h>
 #include <math.h>
 #include <one_euro.h>
 #include <rate_limiter.h>
@@ -146,53 +147,106 @@ ServoSample healthy(bool torque) {
 
 void test_supervisor_healthy() {
   JointSupervisor sup;
-  TEST_ASSERT_EQUAL(Fault::None, sup.update(healthy(true), true, 500.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(healthy(true), true, 500.0f, 500.0f, 0));
 }
 
 void test_supervisor_comm_lost_after_three_failures() {
   JointSupervisor sup;
   ServoSample bad;
-  TEST_ASSERT_EQUAL(Fault::None, sup.update(bad, true, 500.0f, 0));
-  TEST_ASSERT_EQUAL(Fault::None, sup.update(bad, true, 500.0f, 10));
-  TEST_ASSERT_EQUAL(Fault::CommLost, sup.update(bad, true, 500.0f, 20));
-  TEST_ASSERT_EQUAL(Fault::None, sup.update(healthy(true), true, 500.0f, 30));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(bad, true, 500.0f, 500.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(bad, true, 500.0f, 500.0f, 10));
+  TEST_ASSERT_EQUAL(Fault::CommLost, sup.update(bad, true, 500.0f, 500.0f, 20));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(healthy(true), true, 500.0f, 500.0f, 30));
 }
 
 void test_supervisor_torque_mismatch_and_servo_error() {
   JointSupervisor sup;
-  TEST_ASSERT_EQUAL(Fault::TorqueMismatch, sup.update(healthy(false), true, 500.0f, 0));
-  TEST_ASSERT_EQUAL(Fault::TorqueMismatch, sup.update(healthy(true), false, 500.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::TorqueMismatch, sup.update(healthy(false), true, 500.0f, 500.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::TorqueMismatch, sup.update(healthy(true), false, 500.0f, 500.0f, 0));
   ServoSample s = healthy(true);
   s.errorByte = 0x20;
-  TEST_ASSERT_EQUAL(Fault::ServoError, sup.update(s, true, 500.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::ServoError, sup.update(s, true, 500.0f, 500.0f, 0));
 }
 
 void test_supervisor_load_trip_needs_persistence() {
   JointSupervisor sup;
   ServoSample s = healthy(true);
   s.loadPct = -76.0f;  // sign must not matter
-  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 0));
-  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 290));
-  TEST_ASSERT_EQUAL(Fault::LoadTrip, sup.update(s, true, 500.0f, 300));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 500.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 500.0f, 290));
+  TEST_ASSERT_EQUAL(Fault::LoadTrip, sup.update(s, true, 500.0f, 500.0f, 300));
 }
 
 void test_supervisor_load_hard_is_faster() {
   JointSupervisor sup;
   ServoSample s = healthy(true);
   s.loadPct = 85.0f;
-  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 0));
-  TEST_ASSERT_EQUAL(Fault::LoadHard, sup.update(s, true, 500.0f, 100));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 500.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::LoadHard, sup.update(s, true, 500.0f, 500.0f, 100));
 }
 
 void test_supervisor_tracking_error_only_when_armed() {
   JointSupervisor sup;
   ServoSample s = healthy(true);
-  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 560.0f, 0));
-  TEST_ASSERT_EQUAL(Fault::TrackingError, sup.update(s, true, 560.0f, 400));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 560.0f, 560.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::TrackingError, sup.update(s, true, 560.0f, 560.0f, 400));
   sup.reset();
   ServoSample off = healthy(false);
-  TEST_ASSERT_EQUAL(Fault::None, sup.update(off, false, 560.0f, 0));
-  TEST_ASSERT_EQUAL(Fault::None, sup.update(off, false, 560.0f, 1000));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(off, false, 560.0f, 560.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(off, false, 560.0f, 560.0f, 1000));
+}
+
+void test_supervisor_servo_faster_than_model_is_fine() {
+  JointSupervisor sup;
+  ServoSample s = healthy(true);
+  s.position = 590;  // goal 700, model only reached 550: servo is ahead of its model
+  for (uint32_t t = 0; t <= 1000; t += 10) {
+    TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 700.0f, 550.0f, t));
+  }
+}
+
+void test_supervisor_goal_outrunning_capability_is_fine() {
+  JointSupervisor sup;
+  ServoSample s = healthy(true);
+  s.position = 520;  // far behind the goal, but keeping pace with the model
+  for (uint32_t t = 0; t <= 1000; t += 10) {
+    TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 700.0f, 530.0f, t));
+  }
+}
+
+void test_supervisor_lag_behind_model_trips() {
+  JointSupervisor sup;
+  ServoSample s = healthy(true);
+  s.position = 500;  // model reached 590: lag = 200 - 110 = 90 steps
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 700.0f, 590.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 700.0f, 590.0f, 390));
+  TEST_ASSERT_EQUAL(Fault::TrackingError, sup.update(s, true, 700.0f, 590.0f, 400));
+}
+
+// ---- jump guard --------------------------------------------------------------
+
+void test_jump_guard_rejects_single_glitch() {
+  JumpGuard g(25.0f, 3);
+  TEST_ASSERT_EQUAL(JumpGuard::Result::Accepted, g.check(10.0f));
+  TEST_ASSERT_EQUAL(JumpGuard::Result::Accepted, g.check(30.0f));   // 20 deg: fast but plausible
+  TEST_ASSERT_EQUAL(JumpGuard::Result::Rejected, g.check(120.0f));  // glitch
+  TEST_ASSERT_EQUAL(JumpGuard::Result::Accepted, g.check(32.0f));   // back to normal
+}
+
+void test_jump_guard_resyncs_after_persistent_jump() {
+  JumpGuard g(25.0f, 3);
+  g.check(0.0f);
+  TEST_ASSERT_EQUAL(JumpGuard::Result::Rejected, g.check(90.0f));
+  TEST_ASSERT_EQUAL(JumpGuard::Result::Rejected, g.check(90.0f));
+  TEST_ASSERT_EQUAL(JumpGuard::Result::Resynced, g.check(90.0f));
+  TEST_ASSERT_EQUAL(JumpGuard::Result::Accepted, g.check(91.0f));  // new baseline
+}
+
+void test_jump_guard_reset_accepts_anything() {
+  JumpGuard g(25.0f, 3);
+  g.check(0.0f);
+  g.reset();
+  TEST_ASSERT_EQUAL(JumpGuard::Result::Accepted, g.check(170.0f));
 }
 
 void test_supply_uses_median() {
@@ -226,6 +280,12 @@ int main() {
   RUN_TEST(test_supervisor_load_trip_needs_persistence);
   RUN_TEST(test_supervisor_load_hard_is_faster);
   RUN_TEST(test_supervisor_tracking_error_only_when_armed);
+  RUN_TEST(test_supervisor_servo_faster_than_model_is_fine);
+  RUN_TEST(test_supervisor_goal_outrunning_capability_is_fine);
+  RUN_TEST(test_supervisor_lag_behind_model_trips);
+  RUN_TEST(test_jump_guard_rejects_single_glitch);
+  RUN_TEST(test_jump_guard_resyncs_after_persistent_jump);
+  RUN_TEST(test_jump_guard_reset_accepts_anything);
   RUN_TEST(test_supply_uses_median);
   return UNITY_END();
 }

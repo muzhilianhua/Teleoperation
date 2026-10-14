@@ -1,16 +1,20 @@
-// 100 Hz control loop: encoder -> filter -> map -> rate limit -> servo goal,
-// with arming, the IDLE/ALIGN/FOLLOW/HOLD state machine and safety supervision.
+// 100 Hz control loop over the joint table: encoder -> jump guard -> filter ->
+// map -> rate limit -> one SYNC_WRITE per cycle, with arming, the hand-level
+// IDLE/ALIGN/FOLLOW/HOLD state machine, safety supervision and the settings
+// (calibration) store.
 //
-// Only this task touches the servo bus and the encoder bus. Other tasks talk to
-// it through a command queue (in) and a message queue plus snapshot (out), so
-// nothing on the control core ever blocks on USB.
+// Only this task touches the servo bus, the encoder bus and NVS. The console
+// talks to it through a command queue (in) and a message queue plus snapshot
+// (out), so nothing on the control core ever blocks on USB.
 
 #pragma once
 
 #include <Arduino.h>
 #include <AS5048BGroup.h>
+#include <command_parser.h>
 #include <feetech_port.h>
-#include <joint_map.h>
+#include <joint_config.h>
+#include <jump_guard.h>
 #include <one_euro.h>
 #include <rate_limiter.h>
 #include <servo_bus.h>
@@ -21,33 +25,7 @@
 enum class TeleopState : uint8_t { Idle, Align, Follow, Hold };
 const char* teleopStateToString(TeleopState state);
 
-enum class CommandType : uint8_t {
-  Arm,
-  Disarm,
-  Estop,
-  CaptureExoA,
-  CaptureExoB,
-  SetParam,
-  Ping,
-  ResetStats,
-};
-
-enum class ParamId : uint8_t { ServoA, ServoB, MaxSpeed, Acceleration, LeadMs, MinCutoff, Beta };
-
-struct Command {
-  CommandType type = CommandType::Disarm;
-  ParamId param = ParamId::MaxSpeed;
-  float value = 0.0f;
-};
-
-struct MotionParams {
-  float maxSpeed = config::kMaxSpeed;
-  float acceleration = config::kAcceleration;
-  float leadMs = config::kLeadMs;
-  float minCutoffHz = config::kFilterMinCutoffHz;
-  float beta = config::kFilterBeta;
-  uint16_t armSpeed = config::kArmSpeed;
-};
+using Command = teleop::ParsedCommand;
 
 struct TimingStats {
   static constexpr uint16_t kBinUs = 10;
@@ -75,31 +53,39 @@ struct EncoderSummary {
   uint32_t errors = 0;
 };
 
-struct Snapshot {
-  uint32_t cycle = 0;
-  uint32_t uptimeMs = 0;
-  TeleopState state = TeleopState::Idle;
-  bool armed = false;
-  teleop::Fault lastFault = teleop::Fault::None;
-  bool torqueOffConfirmed = true;
-  bool echo = false;
-
+struct JointSnapshot {
+  teleop::JointSettings settings;
+  bool ready = false;
+  bool active = false;       // armed in the current session
+  bool refCaptured = false;  // `cal a` done (or exo calibrated)
   bool encFresh = false;
   uint16_t encRaw = 0;
   float exoCounts = 0.0f;          // unwrapped, relative to exoRef
   float exoFilteredCounts = 0.0f;
   float target = 0.0f;             // mapped servo position
   float goal = 0.0f;               // rate-limited value sent to the servo
+  float reference = 0.0f;          // servo-capability model used by the tracking check
   uint16_t speedRegister = 0;
   bool goalSent = false;
-
   bool servoOk = false;
   ServoState servo;
+  uint32_t jumpRejects = 0;
+};
 
-  teleop::JointMap joint;
-  bool exoRefSet = false;
-  MotionParams params;
-
+struct Snapshot {
+  uint32_t cycle = 0;
+  uint32_t uptimeMs = 0;
+  TeleopState state = TeleopState::Idle;
+  bool armed = false;
+  teleop::Fault lastFault = teleop::Fault::None;
+  uint8_t lastFaultJoint = 0;  // servo id, 0 = hand-level
+  bool torqueOffConfirmed = true;
+  bool echo = false;
+  bool monitor = false;
+  teleop::GlobalSettings global;
+  JointSnapshot joints[teleop::kMaxJoints];
+  int16_t monitorPosition[teleop::kMaxJoints] = {0};
+  bool monitorOk[teleop::kMaxJoints] = {false};
   TimingStats timing;
   FeetechPortStats port;
   AS5048BCycleStats encoderCycle;
@@ -110,12 +96,13 @@ class TeleopController {
  public:
   TeleopController(ServoBus& bus, FeetechPort& port, AS5048BGroup& encoders);
 
-  // Call from setup(): creates queues, arms the E-stop interrupt, switches
-  // every hand servo to torque-off and reports which ones answer.
+  // Call from setup(): creates queues, arms the E-stop interrupt, loads the
+  // stored settings, switches every hand servo to torque-off and pings them.
   bool begin();
   void startTask();
 
-  bool post(const Command& command);
+  // Blocks up to `wait` when the queue is full (pasted dumps arrive in bursts).
+  bool post(const Command& command, TickType_t wait);
   void snapshot(Snapshot& out);
   // Event text for the console; returns false when the queue is empty.
   bool popMessage(char* buffer, size_t length);
@@ -125,18 +112,58 @@ class TeleopController {
     char text[160];
   };
 
+  struct JointChannel {
+    const teleop::JointDefaults* def = nullptr;
+    teleop::JointSettings settings;
+    teleop::OneEuroFilter filter;
+    teleop::RateLimiter limiter;
+    teleop::RateLimiter model;
+    teleop::JumpGuard guard;
+    teleop::JointSupervisor supervisor;
+    bool refCaptured = false;
+    bool active = false;
+    uint8_t encBad = 0;
+    bool encFresh = false;
+    uint16_t encRaw = 0;
+    float exoCounts = 0.0f;
+    float exoFiltered = 0.0f;
+    float target = 0.0f;
+    float goal = 0.0f;
+    float reference = 0.0f;
+    uint16_t speedRegister = 0;
+    bool goalSent = false;
+    bool servoOk = false;
+    ServoState servo;
+    teleop::Fault reportedFault = teleop::Fault::None;
+    uint32_t jumpRejects = 0;
+  };
+
   static void taskEntry(void* arg);
   static void IRAM_ATTR estopIsr();
 
   void run();
-  void cycle(uint32_t wakeUs);
+  void cycle();
   void updateTiming(uint32_t wakeUs);
+  void processEncoder(JointChannel& ch, float dt);
+  bool encoderSample(uint8_t index, uint16_t& raw) const;
+  void readServos(uint32_t nowMs);
+  void stepStateMachine(float dt, uint32_t nowMs);
+  void writeGoals();
+
   void handleCommand(const Command& command);
-  void setParam(ParamId param, float value);
-  void captureExo(bool endpointA);
+  void handleSet(const Command& command);
+  void handleCal(const Command& command);
+  void handleCalHand(const Command& command);
+  void saveConfig();
+  bool loadConfig(bool atBoot);
+  void loadDefaults();
+  void resetChannelRuntime(JointChannel& ch);
+  void applyRuntimeParams(JointChannel& ch);
+  JointChannel* channelForServo(uint8_t servoId);
+
   void pingAll();
   bool arm();
-  void disarm(teleop::Fault fault, const char* reason);
+  void disarmAll(teleop::Fault fault, int jointIndex, const char* reason);
   void torqueOffAll(const char* reason);
   uint16_t streamSpeed(float velocity) const;
   void publish();
@@ -152,35 +179,26 @@ class TeleopController {
   QueueHandle_t messages_ = nullptr;
   TaskHandle_t task_ = nullptr;
   portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
+  Snapshot staging_;
   Snapshot shared_;
   volatile bool estopRequested_ = false;
 
-  teleop::JointMap joint_;
-  bool exoRefSet_ = false;
-  MotionParams params_;
-  teleop::OneEuroFilter filter_;
-  teleop::RateLimiter limiter_;
-  teleop::JointSupervisor jointSupervisor_;
+  JointChannel channels_[teleop::kMaxJoints];
+  teleop::GlobalSettings global_;
   teleop::SupplySupervisor supplySupervisor_;
 
   TeleopState state_ = TeleopState::Idle;
   bool armed_ = false;
+  bool monitor_ = false;
+  uint8_t monitorIndex_ = 0;
+  int16_t monitorPosition_[teleop::kMaxJoints] = {0};
+  bool monitorOk_[teleop::kMaxJoints] = {false};
   teleop::Fault lastFault_ = teleop::Fault::None;
-  teleop::Fault lastReportedFault_ = teleop::Fault::None;
+  uint8_t lastFaultJoint_ = 0;
   bool torqueOffConfirmed_ = true;
+  teleop::Fault reportedSupplyFault_ = teleop::Fault::None;
 
   uint32_t cycle_ = 0;
-  uint8_t encBadCycles_ = 0;
-  bool encFresh_ = false;
-  uint16_t encRaw_ = 0;
-  float exoCounts_ = 0.0f;
-  float exoFiltered_ = 0.0f;
-  float target_ = 0.0f;
-  float goal_ = 0.0f;
-  uint16_t speedRegister_ = 0;
-  bool goalSent_ = false;
-  bool servoOk_ = false;
-  ServoState servo_;
   uint32_t holdSinceMs_ = 0;
   uint32_t encGoodSinceMs_ = 0;
   bool encGoodTiming_ = false;

@@ -1,5 +1,6 @@
-// Exoskeleton -> dexterous hand teleoperation, milestone M0:
-// one AS5048B encoder drives one SCS0009 servo through the full control path.
+// Exoskeleton -> dexterous hand teleoperation, milestone M1:
+// joint table for the 8 hand servos, console calibration stored in NVS,
+// per-joint speed limits.
 
 #include <Arduino.h>
 #include <AS5048B.h>
@@ -35,6 +36,7 @@ Console console(controller);
 }  // namespace
 
 void setup() {
+  Serial.setRxBufferSize(4096);  // a pasted `dump` (~1.5 KB) must not overflow
   Serial.begin(115200);
   const uint32_t waitStart = millis();
   while (!Serial && millis() - waitStart < 1500) delay(10);

@@ -1,9 +1,30 @@
 #include "control_task.h"
 
+#include <config_blob.h>
 #include <esp_task_wdt.h>
 #include <stdarg.h>
 
+#include "config_store.h"
+
 using teleop::Fault;
+using teleop::JumpGuard;
+using teleop::Verb;
+
+namespace {
+
+// The servo jumps to speed without a ramp (servo_bringup single-write check G),
+// so the capability model only needs a token acceleration limit.
+constexpr float kModelAcceleration = 20000.0f;
+
+const char* notReadyReason(const teleop::JointSettings& s, const teleop::JointDefaults& d) {
+  if (!s.enabled) return "disabled";
+  if (s.encoderIndex >= config::kEncoderCount) return "no encoder assigned (set <j> enc <n>)";
+  if (!teleop::exoCalibrated(s)) return "exo not calibrated (cal <j> a / b)";
+  if (!teleop::servoCalibrated(s, d)) return "servo endpoints not set (cal <j> hand a / b)";
+  return "ready";
+}
+
+}  // namespace
 
 TeleopController* TeleopController::instance_ = nullptr;
 
@@ -19,29 +40,30 @@ const char* teleopStateToString(TeleopState state) {
 
 TeleopController::TeleopController(ServoBus& bus, FeetechPort& port, AS5048BGroup& encoders)
     : bus_(bus), port_(port), encoders_(encoders) {
-  joint_.name = config::kJointName;
-  joint_.encoderIndex = config::kJointEncoderIndex;
-  joint_.servoId = config::kJointServoId;
-  joint_.servoMin = config::kJointServoMin;
-  joint_.servoMax = config::kJointServoMax;
-  // Servo endpoints default to the travel limits; refine with `set sa/sb`.
-  joint_.servoA = config::kJointServoMin;
-  joint_.servoB = config::kJointServoMax;
-  filter_.setParams(params_.minCutoffHz, params_.beta, config::kFilterDCutoffHz);
-  limiter_ = teleop::RateLimiter(joint_.servoMin, params_.maxSpeed, params_.acceleration,
-                                 joint_.servoMin, joint_.servoMax);
+  global_ = config::kGlobalDefaults;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    JointChannel& ch = channels_[i];
+    ch.def = &config::kJoints[i];
+    ch.settings = teleop::defaultSettings(*ch.def);
+    ch.limiter = teleop::RateLimiter(ch.def->travelMin, ch.settings.vmax, ch.settings.amax,
+                                     ch.def->travelMin, ch.def->travelMax);
+    ch.model = ch.limiter;
+    resetChannelRuntime(ch);
+    applyRuntimeParams(ch);
+  }
 }
 
 bool TeleopController::begin() {
   instance_ = this;
-  commands_ = xQueueCreate(16, sizeof(Command));
-  messages_ = xQueueCreate(24, sizeof(Message));
+  commands_ = xQueueCreate(32, sizeof(Command));
+  messages_ = xQueueCreate(32, sizeof(Message));
   if (commands_ == nullptr || messages_ == nullptr) return false;
 
   pinMode(config::kEstopPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(config::kEstopPin), estopIsr, FALLING);
 
   message("servo bus echo: %s", port_.echo() ? "detected, filtering enabled" : "none");
+  loadConfig(true);
   torqueOffAll("boot");
   pingAll();
   publish();
@@ -59,8 +81,8 @@ void IRAM_ATTR TeleopController::estopIsr() {
   if (instance_ != nullptr) instance_->estopRequested_ = true;
 }
 
-bool TeleopController::post(const Command& command) {
-  return xQueueSend(commands_, &command, 0) == pdTRUE;
+bool TeleopController::post(const Command& command, TickType_t wait) {
+  return xQueueSend(commands_, &command, wait) == pdTRUE;
 }
 
 void TeleopController::snapshot(Snapshot& out) {
@@ -86,6 +108,35 @@ void TeleopController::message(const char* format, ...) {
   xQueueSend(messages_, &msg, 0);  // drop rather than block the control loop
 }
 
+TeleopController::JointChannel* TeleopController::channelForServo(uint8_t servoId) {
+  const int index = teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
+  return index < 0 ? nullptr : &channels_[index];
+}
+
+void TeleopController::resetChannelRuntime(JointChannel& ch) {
+  ch.filter.reset();
+  ch.guard.reset();
+  ch.supervisor.reset();
+  ch.refCaptured = teleop::exoCalibrated(ch.settings);
+  ch.active = false;
+  ch.encBad = 0;
+  ch.encFresh = false;
+  ch.reportedFault = Fault::None;
+}
+
+void TeleopController::applyRuntimeParams(JointChannel& ch) {
+  ch.filter.setParams(global_.minCutoffHz, global_.beta, config::kFilterDCutoffHz);
+  ch.guard.setMaxStep(global_.jumpDeg);
+  teleop::SupervisorConfig sc;
+  sc.trackingErrorSteps = ch.settings.trackSteps;
+  ch.supervisor.setConfig(sc);
+  ch.limiter.setTravel(ch.def->travelMin, ch.def->travelMax);
+  const float speed = state_ == TeleopState::Align ? config::kArmSpeed : ch.settings.vmax;
+  ch.limiter.setLimits(speed, ch.settings.amax);
+  ch.model.setTravel(ch.def->travelMin, ch.def->travelMax);
+  ch.model.setLimits(ch.settings.vsat, kModelAcceleration);
+}
+
 // ---- loop -------------------------------------------------------------------
 
 void TeleopController::run() {
@@ -96,7 +147,7 @@ void TeleopController::run() {
     vTaskDelayUntil(&lastWake, period);
     const uint32_t wakeUs = micros();
     updateTiming(wakeUs);
-    cycle(wakeUs);
+    cycle();
     const uint32_t execUs = micros() - wakeUs;
     timing_.lastExecUs = execUs;
     timing_.totalExecUs += execUs;
@@ -122,7 +173,7 @@ void TeleopController::updateTiming(uint32_t wakeUs) {
   lastWakeUs_ = wakeUs;
 }
 
-void TeleopController::cycle(uint32_t /*wakeUs*/) {
+void TeleopController::cycle() {
   const float dt = 1.0f / config::kControlHz;
   const uint32_t nowMs = millis();
   ++cycle_;
@@ -134,120 +185,256 @@ void TeleopController::cycle(uint32_t /*wakeUs*/) {
   Command command;
   while (xQueueReceive(commands_, &command, 0) == pdTRUE) handleCommand(command);
 
-  // 1. Encoder -> filtered exo position -> mapped servo target
   encoders_.sample(cycle_ % config::kFullEncoderReadEvery == 0);
-  const AS5048BChannel& ch = encoders_.channel(joint_.encoderIndex);
-  encFresh_ = ch.state == AS5048BChannelState::Online && ch.lastStatus == AS5048BStatus::Ok;
-  if (encFresh_) {
-    encBadCycles_ = 0;
-    encRaw_ = ch.reading.angle;
-    exoCounts_ = static_cast<float>(teleop::unwrapCounts(encRaw_, joint_.exoRef));
-    const float deg = filter_.filter(exoCounts_ * teleop::kDegreesPerCount, dt);
-    exoFiltered_ = deg / teleop::kDegreesPerCount;
-    target_ = teleop::mapToServo(joint_, exoFiltered_);
-    if (params_.leadMs > 0.0f && joint_.exoCalibrated()) {
-      const float slope =
-          static_cast<float>(joint_.servoB - joint_.servoA) / static_cast<float>(joint_.exoB - joint_.exoA);
-      const float servoVelocity = filter_.derivative() / teleop::kDegreesPerCount * slope;
-      const float lo = min(joint_.servoA, joint_.servoB);
-      const float hi = max(joint_.servoA, joint_.servoB);
-      target_ = constrain(target_ + servoVelocity * params_.leadMs * 1e-3f, lo, hi);
-    }
-  } else if (encBadCycles_ < 0xFF) {
-    ++encBadCycles_;
-  }
-  const bool encFault = encBadCycles_ >= config::kEncoderFailCycles;
-
-  // 2. Servo state + supervision
-  ServoState st;
-  servoOk_ = bus_.readState(joint_.servoId, st);
-  if (servoOk_) servo_ = st;
-  teleop::ServoSample sample;
-  sample.readOk = servoOk_;
-  sample.torqueOn = st.torqueOn;
-  sample.position = st.position;
-  sample.loadPct = st.loadPct;
-  sample.voltage = st.voltage;
-  sample.temperatureC = st.temperatureC;
-  sample.errorByte = st.errorByte;
-  sample.status = st.status;
-  Fault fault = jointSupervisor_.update(sample, armed_, goal_, nowMs);
-  if (fault == Fault::None && servoOk_) fault = supplySupervisor_.update(&st.voltage, 1, nowMs);
-  if (fault != Fault::None) {
-    if (armed_) {
-      disarm(fault, teleop::faultToString(fault));
+  for (JointChannel& ch : channels_) {
+    if (ch.settings.enabled && ch.settings.encoderIndex < config::kEncoderCount) {
+      processEncoder(ch, dt);
     } else {
-      if (fault == Fault::TorqueMismatch) {
-        // Torque on while the firmware has the joint disarmed: switch it off again.
-        bus_.writeTorque(joint_.servoId, false);
-      }
-      if (fault != lastReportedFault_) message("idle fault: %s", teleop::faultToString(fault));
+      ch.encFresh = false;
+      ch.encBad = 0;
     }
   }
-  lastReportedFault_ = fault;
 
-  // 3. State machine -> goal
+  readServos(nowMs);
+  stepStateMachine(dt, nowMs);
+  writeGoals();
+}
+
+bool TeleopController::encoderSample(uint8_t index, uint16_t& raw) const {
+  if (index >= encoders_.count()) return false;
+  const AS5048BChannel& ch = encoders_.channel(index);
+  if (ch.state != AS5048BChannelState::Online || ch.lastStatus != AS5048BStatus::Ok) return false;
+  raw = ch.reading.angle;
+  return true;
+}
+
+void TeleopController::processEncoder(JointChannel& ch, float dt) {
+  uint16_t raw = 0;
+  if (!encoderSample(ch.settings.encoderIndex, raw)) {
+    ch.encFresh = false;
+    if (ch.encBad < 0xFF) ++ch.encBad;
+    return;
+  }
+  const float deg = teleop::unwrapCounts(raw, ch.settings.exoRef) * teleop::kDegreesPerCount;
+  const JumpGuard::Result guard = ch.guard.check(deg);
+  if (guard != JumpGuard::Result::Accepted) {
+    ++ch.jumpRejects;
+    ch.encFresh = false;
+    if (ch.encBad < 0xFF) ++ch.encBad;
+    if (guard == JumpGuard::Result::Resynced) {
+      ch.filter.reset();
+      message("joint %u: encoder jumped > %.0f deg per cycle 3 times, re-synced", ch.def->servoId,
+              global_.jumpDeg);
+    }
+    return;
+  }
+
+  ch.encFresh = true;
+  ch.encBad = 0;
+  ch.encRaw = raw;
+  ch.exoCounts = deg / teleop::kDegreesPerCount;
+  ch.exoFiltered = ch.filter.filter(deg, dt) / teleop::kDegreesPerCount;
+  if (!teleop::exoCalibrated(ch.settings)) return;
+
+  const teleop::JointMap map = teleop::toJointMap(ch.settings, *ch.def);
+  ch.target = teleop::mapToServo(map, ch.exoFiltered);
+  if (global_.leadMs > 0.0f) {
+    const float slope = static_cast<float>(map.servoB - map.servoA) / static_cast<float>(map.exoB);
+    const float servoVelocity = ch.filter.derivative() / teleop::kDegreesPerCount * slope;
+    const float lo = min(map.servoA, map.servoB);
+    const float hi = max(map.servoA, map.servoB);
+    ch.target = constrain(ch.target + servoVelocity * global_.leadMs * 1e-3f, lo, hi);
+  }
+}
+
+void TeleopController::readServos(uint32_t nowMs) {
+  if (monitor_ && !armed_) {
+    // One servo per cycle so a full sweep of the hand costs ~0.6 ms per cycle.
+    const uint8_t i = monitorIndex_;
+    monitorIndex_ = static_cast<uint8_t>((monitorIndex_ + 1) % teleop::kMaxJoints);
+    ServoState st;
+    monitorOk_[i] = bus_.readState(channels_[i].def->servoId, st);
+    if (monitorOk_[i]) {
+      monitorPosition_[i] = st.position;
+      channels_[i].servo = st;
+    }
+    channels_[i].servoOk = monitorOk_[i];
+    return;
+  }
+
+  float voltages[teleop::kMaxJoints];
+  uint8_t voltageCount = 0;
+  Fault pending = Fault::None;
+  int pendingJoint = -1;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    JointChannel& ch = channels_[i];
+    if (!ch.settings.enabled) {
+      ch.servoOk = false;
+      continue;
+    }
+    ServoState st;
+    ch.servoOk = bus_.readState(ch.def->servoId, st);
+    if (ch.servoOk) {
+      ch.servo = st;
+      voltages[voltageCount++] = st.voltage;
+    }
+    teleop::ServoSample sample;
+    sample.readOk = ch.servoOk;
+    sample.torqueOn = st.torqueOn;
+    sample.position = st.position;
+    sample.loadPct = st.loadPct;
+    sample.voltage = st.voltage;
+    sample.temperatureC = st.temperatureC;
+    sample.errorByte = st.errorByte;
+    sample.status = st.status;
+    const bool armedJoint = armed_ && ch.active;
+    const Fault fault = ch.supervisor.update(sample, armedJoint, ch.goal, ch.reference, nowMs);
+    if (fault != Fault::None) {
+      if (armedJoint) {
+        if (pending == Fault::None) {
+          pending = fault;
+          pendingJoint = i;
+        }
+      } else {
+        if (fault == Fault::TorqueMismatch) bus_.writeTorque(ch.def->servoId, false);
+        if (fault != ch.reportedFault) {
+          message("joint %u idle fault: %s", ch.def->servoId, teleop::faultToString(fault));
+        }
+      }
+    }
+    ch.reportedFault = fault;
+  }
+
+  const Fault supply = supplySupervisor_.update(voltages, voltageCount, nowMs);
+  if (supply != Fault::None && pending == Fault::None) {
+    if (armed_) {
+      pending = supply;
+    } else if (supply != reportedSupplyFault_) {
+      message("idle fault: %s", teleop::faultToString(supply));
+    }
+  }
+  reportedSupplyFault_ = supply;
+
+  if (pending != Fault::None) disarmAll(pending, pendingJoint, teleop::faultToString(pending));
+}
+
+void TeleopController::stepStateMachine(float dt, uint32_t nowMs) {
+  bool anyEncFault = false;
+  int faultJoint = -1;
+  bool allFresh = true;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    const JointChannel& ch = channels_[i];
+    if (!ch.active) continue;
+    if (ch.encBad >= config::kEncoderFailCycles && !anyEncFault) {
+      anyEncFault = true;
+      faultJoint = i;
+    }
+    allFresh &= ch.encFresh;
+  }
+
   switch (state_) {
     case TeleopState::Idle:
-      if (servoOk_) limiter_.reset(st.position);
-      goal_ = limiter_.position();
-      break;
-
-    case TeleopState::Align:
-      if (encFault) {
-        disarm(Fault::None, "encoder lost during ALIGN");
-        break;
+      for (JointChannel& ch : channels_) {
+        if (!ch.settings.enabled || !ch.servoOk) continue;
+        ch.limiter.reset(ch.servo.position);
+        ch.model.reset(ch.servo.position);
+        ch.goal = ch.reference = ch.servo.position;
       }
-      limiter_.setLimits(params_.armSpeed, params_.acceleration);
-      limiter_.setTarget(target_);
-      goal_ = limiter_.step(dt);
-      if (fabsf(goal_ - target_) <= config::kAlignTolerance) {
-        limiter_.setLimits(params_.maxSpeed, params_.acceleration);
+      return;
+
+    case TeleopState::Align: {
+      if (anyEncFault) {
+        disarmAll(Fault::None, faultJoint, "encoder lost during ALIGN");
+        return;
+      }
+      bool aligned = true;
+      for (JointChannel& ch : channels_) {
+        if (!ch.active) continue;
+        ch.limiter.setTarget(ch.target);
+        ch.goal = ch.limiter.step(dt);
+        aligned &= fabsf(ch.goal - ch.target) <= config::kAlignTolerance;
+      }
+      if (aligned) {
         state_ = TeleopState::Follow;
+        for (JointChannel& ch : channels_) {
+          if (ch.active) ch.limiter.setLimits(ch.settings.vmax, ch.settings.amax);
+        }
         message("ALIGN done -> FOLLOW");
       }
       break;
+    }
 
     case TeleopState::Follow:
-      if (encFault) {
+      if (anyEncFault) {
         state_ = TeleopState::Hold;
         holdSinceMs_ = nowMs;
         encGoodTiming_ = false;
-        limiter_.setTarget(limiter_.position());
-        message("encoder fault (%s) -> HOLD", AS5048B::statusToString(ch.lastStatus));
+        for (JointChannel& ch : channels_) {
+          if (ch.active) ch.limiter.setTarget(ch.limiter.position());
+        }
+        message("joint %u encoder fault -> HOLD", channels_[faultJoint].def->servoId);
       } else {
-        limiter_.setTarget(target_);
+        for (JointChannel& ch : channels_) {
+          if (ch.active) ch.limiter.setTarget(ch.target);
+        }
       }
-      goal_ = limiter_.step(dt);
+      for (JointChannel& ch : channels_) {
+        if (ch.active) ch.goal = ch.limiter.step(dt);
+      }
       break;
 
     case TeleopState::Hold:
-      goal_ = limiter_.step(dt);
-      if (encFresh_) {
+      for (JointChannel& ch : channels_) {
+        if (ch.active) ch.goal = ch.limiter.step(dt);
+      }
+      if (allFresh) {
         if (!encGoodTiming_) {
           encGoodTiming_ = true;
           encGoodSinceMs_ = nowMs;
         } else if (nowMs - encGoodSinceMs_ >= config::kHoldRecoverMs) {
           state_ = TeleopState::Align;
-          message("encoder back -> ALIGN");
+          for (JointChannel& ch : channels_) {
+            if (ch.active) ch.limiter.setLimits(config::kArmSpeed, ch.settings.amax);
+          }
+          message("encoders back -> ALIGN");
           break;
         }
       } else {
         encGoodTiming_ = false;
       }
-      if (nowMs - holdSinceMs_ > config::kHoldTimeoutMs) disarm(Fault::None, "encoder lost > 3 s");
+      if (nowMs - holdSinceMs_ > config::kHoldTimeoutMs) {
+        disarmAll(Fault::None, faultJoint, "encoder lost > 3 s");
+        return;
+      }
       break;
   }
 
-  // 4. Goal write: only to an armed joint whose torque we just read back as on
-  goalSent_ = false;
-  if (armed_ && servoOk_ && st.torqueOn && state_ != TeleopState::Idle) {
-    const uint8_t id = joint_.servoId;
-    const int16_t position = static_cast<int16_t>(lroundf(goal_));
-    speedRegister_ = streamSpeed(limiter_.velocity());
-    bus_.syncWriteGoal(&id, &position, &speedRegister_, 1);
-    goalSent_ = true;
+  // Capability model for the tracking check: chases the goal at vsat.
+  for (JointChannel& ch : channels_) {
+    if (!ch.active) continue;
+    ch.model.setTarget(ch.goal);
+    ch.reference = ch.model.step(dt);
   }
+}
+
+void TeleopController::writeGoals() {
+  uint8_t ids[teleop::kMaxJoints];
+  int16_t positions[teleop::kMaxJoints];
+  uint16_t speeds[teleop::kMaxJoints];
+  uint8_t n = 0;
+  for (JointChannel& ch : channels_) {
+    ch.goalSent = false;
+    // Only to armed joints whose torque we just read back as on: a goal write
+    // to a disarmed SCS0009 would switch its torque on by itself.
+    if (!armed_ || state_ == TeleopState::Idle || !ch.active || !ch.servoOk || !ch.servo.torqueOn) continue;
+    ch.speedRegister = streamSpeed(ch.limiter.velocity());
+    ids[n] = ch.def->servoId;
+    positions[n] = static_cast<int16_t>(lroundf(ch.goal));
+    speeds[n] = ch.speedRegister;
+    ch.goalSent = true;
+    ++n;
+  }
+  if (n > 0) bus_.syncWriteGoal(ids, positions, speeds, n);
 }
 
 uint16_t TeleopController::streamSpeed(float velocity) const {
@@ -259,123 +446,204 @@ uint16_t TeleopController::streamSpeed(float velocity) const {
 
 // ---- commands -----------------------------------------------------------------
 
-void TeleopController::handleCommand(const Command& command) {
-  switch (command.type) {
-    case CommandType::Arm: arm(); break;
-    case CommandType::Disarm: disarm(Fault::None, "operator"); break;
-    case CommandType::Estop: torqueOffAll("E-stop (console)"); break;
-    case CommandType::CaptureExoA: captureExo(true); break;
-    case CommandType::CaptureExoB: captureExo(false); break;
-    case CommandType::SetParam: setParam(command.param, command.value); break;
-    case CommandType::Ping:
-      if (armed_) {
-        message("ping refused while armed");
-      } else {
-        pingAll();
-      }
-      break;
-    case CommandType::ResetStats:
+void TeleopController::handleCommand(const Command& c) {
+  if (armed_ && teleop::requiresDisarmed(c)) {
+    message("refused while armed: disarm first");
+    return;
+  }
+  switch (c.verb) {
+    case Verb::Arm: arm(); break;
+    case Verb::Disarm: disarmAll(Fault::None, -1, "operator"); break;
+    case Verb::Estop: torqueOffAll("E-stop (console)"); break;
+    case Verb::Ping: pingAll(); break;
+    case Verb::StatsReset:
       timing_ = TimingStats();
       memset(jitterHistogram_, 0, sizeof(jitterHistogram_));
       lastWakeUs_ = 0;
       port_.clearStats();
       encoders_.clearStats();
+      for (JointChannel& ch : channels_) ch.jumpRejects = 0;
       message("statistics cleared");
       break;
+    case Verb::Monitor:
+      monitor_ = c.flag;
+      message("monitor %s", monitor_ ? "on" : "off");
+      break;
+    case Verb::Cal: handleCal(c); break;
+    case Verb::CalHand: handleCalHand(c); break;
+    case Verb::Set: handleSet(c); break;
+    case Verb::Save: saveConfig(); break;
+    case Verb::Load: loadConfig(false); break;
+    case Verb::Defaults: loadDefaults(); break;
+    default: break;  // console-only verbs never reach the controller
   }
 }
 
-void TeleopController::setParam(ParamId param, float value) {
-  switch (param) {
-    case ParamId::ServoA:
-    case ParamId::ServoB: {
-      if (armed_) {
-        message("disarm before changing servo endpoints");
-        return;
-      }
-      const int16_t v = static_cast<int16_t>(lroundf(value));
-      if (v < joint_.servoMin || v > joint_.servoMax) {
-        message("rejected: %d outside travel [%d, %d]", v, joint_.servoMin, joint_.servoMax);
-        return;
-      }
-      (param == ParamId::ServoA ? joint_.servoA : joint_.servoB) = v;
-      message("servo %c = %d", param == ParamId::ServoA ? 'A' : 'B', v);
-      return;
+void TeleopController::handleSet(const Command& c) {
+  teleop::JointSettings joints[teleop::kMaxJoints];
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) joints[i] = channels_[i].settings;
+  teleop::GlobalSettings global = global_;
+  const char* error =
+      teleop::applySetting(c, joints, config::kJoints, teleop::kMaxJoints, global, config::kEncoderCount);
+  if (error != nullptr) {
+    message("set rejected: %s", error);
+    return;
+  }
+  global_ = global;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    JointChannel& ch = channels_[i];
+    const teleop::JointSettings& next = joints[i];
+    const bool mappingChanged = next.encoderIndex != ch.settings.encoderIndex ||
+                                next.exoRef != ch.settings.exoRef || next.exoB != ch.settings.exoB;
+    ch.settings = next;
+    if (mappingChanged) {
+      ch.filter.reset();
+      ch.guard.reset();
+      ch.refCaptured = teleop::exoCalibrated(ch.settings);
     }
-    case ParamId::MaxSpeed:
-      if (value < 1.0f || value > 1000.0f) break;
-      params_.maxSpeed = value;
-      if (state_ != TeleopState::Align) limiter_.setLimits(params_.maxSpeed, params_.acceleration);
-      message("vmax = %.0f steps/s", value);
-      return;
-    case ParamId::Acceleration:
-      if (value < 10.0f || value > 20000.0f) break;
-      params_.acceleration = value;
-      limiter_.setLimits(state_ == TeleopState::Align ? params_.armSpeed : params_.maxSpeed,
-                         params_.acceleration);
-      message("amax = %.0f steps/s^2", value);
-      return;
-    case ParamId::LeadMs:
-      if (value < 0.0f || value > 300.0f) break;
-      params_.leadMs = value;
-      message("lead = %.0f ms", value);
-      return;
-    case ParamId::MinCutoff:
-      if (value < 0.01f || value > 30.0f) break;
-      params_.minCutoffHz = value;
-      filter_.setParams(params_.minCutoffHz, params_.beta, config::kFilterDCutoffHz);
-      message("mincut = %.3f Hz", value);
-      return;
-    case ParamId::Beta:
-      if (value < 0.0f || value > 10.0f) break;
-      params_.beta = value;
-      filter_.setParams(params_.minCutoffHz, params_.beta, config::kFilterDCutoffHz);
-      message("beta = %.4f", value);
-      return;
+    applyRuntimeParams(ch);
   }
-  message("rejected: value %.3f out of range", value);
+  if (teleop::isGlobalKey(c.key)) {
+    message("global: lead %.0f ms, mincut %.3f Hz, beta %.4f, jump %.0f deg", global_.leadMs,
+            global_.minCutoffHz, global_.beta, global_.jumpDeg);
+  } else if (JointChannel* ch = channelForServo(c.joint)) {
+    const teleop::JointSettings& s = ch->settings;
+    message("joint %u: %s enc %d exo %d servo %d..%d vmax %u amax %u vsat %u trk %u", c.joint,
+            s.enabled ? "on" : "off", s.encoderIndex == teleop::kNoEncoder ? -1 : s.encoderIndex,
+            s.exoB, s.servoA, s.servoB, s.vmax, s.amax, s.vsat, s.trackSteps);
+  }
 }
 
-void TeleopController::captureExo(bool endpointA) {
-  if (armed_) {
-    message("disarm before capturing exo endpoints");
+void TeleopController::handleCal(const Command& c) {
+  JointChannel* ch = channelForServo(c.joint);
+  if (ch == nullptr) {
+    message("no joint with servo id %u", c.joint);
     return;
   }
-  if (!encFresh_) {
-    message("encoder %u not healthy, capture refused", joint_.encoderIndex);
+  if (ch->settings.encoderIndex >= config::kEncoderCount) {
+    message("joint %u: assign an encoder first (set %u enc <n>)", c.joint, c.joint);
     return;
   }
-  if (endpointA) {
-    joint_.exoRef = encRaw_;
-    joint_.exoA = 0;
-    joint_.exoB = 0;  // B is relative to the new reference: capture it again
-    exoRefSet_ = true;
-    filter_.reset();
-    message("exo A captured (raw %u). Move to the other end and run `exo b`.", encRaw_);
+  uint16_t raw = 0;
+  if (!encoderSample(ch->settings.encoderIndex, raw)) {
+    message("joint %u: encoder %u not healthy, capture refused", c.joint, ch->settings.encoderIndex);
     return;
   }
-  if (!exoRefSet_) {
-    message("capture `exo a` first");
+  if (!c.flag) {
+    ch->settings.exoRef = raw;
+    ch->settings.exoB = 0;  // B is relative to the new reference: capture it again
+    ch->refCaptured = true;
+    ch->filter.reset();
+    ch->guard.reset();
+    message("joint %u: exo A captured (raw %u). Move to the other end and run `cal %u b`.", c.joint,
+            raw, c.joint);
     return;
   }
-  const int32_t span = teleop::unwrapCounts(encRaw_, joint_.exoRef);
-  if (abs(span) < config::kMinExoSpanCounts) {
-    message("rejected: span %.1f deg is too small", span * teleop::kDegreesPerCount);
+  if (!ch->refCaptured) {
+    message("joint %u: run `cal %u a` first", c.joint, c.joint);
     return;
   }
-  joint_.exoB = static_cast<int16_t>(span);
-  message("exo B captured: span %.1f deg (%ld counts)", span * teleop::kDegreesPerCount,
-          static_cast<long>(span));
+  const int32_t span = teleop::unwrapCounts(raw, ch->settings.exoRef);
+  if (abs(span) < teleop::kMinExoSpanCounts) {
+    message("joint %u: span %.1f deg is too small, rejected", c.joint, span * teleop::kDegreesPerCount);
+    return;
+  }
+  ch->settings.exoB = static_cast<int16_t>(span);
+  ch->filter.reset();
+  ch->guard.reset();
+  message("joint %u: exo B captured, span %.1f deg", c.joint, span * teleop::kDegreesPerCount);
+}
+
+void TeleopController::handleCalHand(const Command& c) {
+  JointChannel* ch = channelForServo(c.joint);
+  if (ch == nullptr) {
+    message("no joint with servo id %u", c.joint);
+    return;
+  }
+  ServoState st;
+  if (!bus_.readState(c.joint, st)) {
+    message("joint %u: no reply from servo", c.joint);
+    return;
+  }
+  if (st.torqueOn) {
+    bus_.writeTorque(c.joint, false);
+    message("joint %u: servo had torque on, switched off; move the finger by hand and retry", c.joint);
+    return;
+  }
+  if (st.position < ch->def->travelMin || st.position > ch->def->travelMax) {
+    message("joint %u: position %d outside travel [%d, %d], rejected", c.joint, st.position,
+            ch->def->travelMin, ch->def->travelMax);
+    return;
+  }
+  (c.flag ? ch->settings.servoB : ch->settings.servoA) = st.position;
+  message("joint %u: servo %c = %d%s", c.joint, c.flag ? 'B' : 'A', st.position,
+          ch->settings.servoA == ch->settings.servoB ? " (A = B: capture the other end)" : "");
+}
+
+void TeleopController::saveConfig() {
+  teleop::JointSettings joints[teleop::kMaxJoints];
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) joints[i] = channels_[i].settings;
+  uint8_t blob[teleop::kBlobSize];
+  const size_t n =
+      teleop::packConfig(joints, teleop::kMaxJoints, global_, config::kServoBackend, blob, sizeof(blob));
+  const bool ok = n > 0 && config_store::save(blob, n);
+  message(ok ? "configuration saved to NVS" : "SAVE FAILED");
+}
+
+bool TeleopController::loadConfig(bool atBoot) {
+  uint8_t blob[teleop::kBlobSize + 16];
+  const size_t length = config_store::load(blob, sizeof(blob));
+  if (length == 0) {
+    message("no stored configuration%s", atBoot ? ", using defaults" : "");
+    return false;
+  }
+  teleop::JointSettings joints[teleop::kMaxJoints];
+  teleop::GlobalSettings global;
+  uint8_t badJoint = 0xFF;
+  const teleop::BlobStatus status = teleop::unpackConfig(
+      blob, length, config::kServoBackend, config::kJoints, teleop::kMaxJoints, config::kEncoderCount,
+      config::kGlobalDefaults, joints, global, &badJoint);
+  if (!teleop::blobApplied(status)) {
+    message("stored configuration rejected (%s), %s", teleop::blobStatusToString(status),
+            atBoot ? "using defaults" : "keeping current settings");
+    return false;
+  }
+  global_ = global;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    channels_[i].settings = joints[i];
+    resetChannelRuntime(channels_[i]);
+    applyRuntimeParams(channels_[i]);
+  }
+  if (status == teleop::BlobStatus::Ok) {
+    message("configuration loaded from NVS");
+  } else if (badJoint < teleop::kMaxJoints) {
+    message("configuration loaded with corrections: %s (first: joint %u)",
+            teleop::blobStatusToString(status), config::kJoints[badJoint].servoId);
+  } else {
+    message("configuration loaded with corrections: %s", teleop::blobStatusToString(status));
+  }
+  return true;
+}
+
+void TeleopController::loadDefaults() {
+  global_ = config::kGlobalDefaults;
+  for (JointChannel& ch : channels_) {
+    ch.settings = teleop::defaultSettings(*ch.def);
+    resetChannelRuntime(ch);
+    applyRuntimeParams(ch);
+  }
+  message("defaults loaded (not saved; run `save` to keep them)");
 }
 
 void TeleopController::pingAll() {
-  for (uint8_t i = 0; i < config::kHandServoCount; ++i) {
-    const uint8_t id = config::kHandServoIds[i];
+  for (const JointChannel& ch : channels_) {
+    const uint8_t id = ch.def->servoId;
     uint16_t model = 0;
     if (bus_.ping(id, &model)) {
-      message("servo %u: model %u%s", id, model, model == bus_.expectedModel() ? "" : " (unexpected)");
+      message("servo %u (%s): model %u%s", id, ch.def->name, model,
+              model == bus_.expectedModel() ? "" : " (unexpected)");
     } else {
-      message("servo %u: no reply", id);
+      message("servo %u (%s): no reply", id, ch.def->name);
     }
   }
 }
@@ -387,75 +655,115 @@ bool TeleopController::arm() {
     message("already armed");
     return false;
   }
-  if (!joint_.ready()) {
-    message("arm refused: joint not calibrated (exo a / exo b, servo sa / sb)");
-    return false;
+  uint8_t enabled = 0;
+  ServoState states[teleop::kMaxJoints];
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    JointChannel& ch = channels_[i];
+    if (!ch.settings.enabled) continue;
+    ++enabled;
+    const uint8_t id = ch.def->servoId;
+    if (!teleop::jointReady(ch.settings, *ch.def, config::kEncoderCount)) {
+      message("arm refused: joint %u %s", id, notReadyReason(ch.settings, *ch.def));
+      return false;
+    }
+    if (!ch.encFresh) {
+      message("arm refused: joint %u encoder not healthy", id);
+      return false;
+    }
+    ServoState& st = states[i];
+    if (!bus_.readState(id, st)) {
+      message("arm refused: no status reply from servo %u", id);
+      return false;
+    }
+    if (st.errorByte != 0 || st.status != 0) {
+      message("arm refused: servo %u error byte 0x%02X status 0x%02X", id, st.errorByte, st.status);
+      return false;
+    }
+    if (st.position < ch.def->travelMin || st.position > ch.def->travelMax) {
+      message("arm refused: servo %u at %d outside travel [%d, %d]; move it back by hand", id,
+              st.position, ch.def->travelMin, ch.def->travelMax);
+      return false;
+    }
   }
-  if (encBadCycles_ != 0) {
-    message("arm refused: encoder not healthy");
-    return false;
-  }
-  const uint8_t id = joint_.servoId;
-  ServoState st;
-  if (!bus_.readState(id, st)) {
-    message("arm refused: no status reply from servo %u", id);
-    return false;
-  }
-  if (st.errorByte != 0 || st.status != 0) {
-    message("arm refused: servo error byte 0x%02X status 0x%02X", st.errorByte, st.status);
-    return false;
-  }
-  if (st.position < joint_.servoMin || st.position > joint_.servoMax) {
-    message("arm refused: position %d outside travel [%d, %d]; move it back by hand", st.position,
-            joint_.servoMin, joint_.servoMax);
+  if (enabled == 0) {
+    message("arm refused: no joint enabled (set <j> on)");
     return false;
   }
 
-  // Goal before torque: a goal write switches torque on by itself on SCS0009,
-  // so the joint may only ever be told to hold where it already is.
-  const int16_t hold = st.position;
-  const char* problem = nullptr;
-  ServoState check;
-  if (!bus_.writeGoal(id, hold, params_.armSpeed)) {
-    problem = "goal write failed";
-  } else if (!bus_.writeTorque(id, true)) {
-    problem = "torque write failed";
-  } else if (!bus_.readState(id, check)) {
-    problem = "no read-back after arming";
-  } else if (!check.torqueOn) {
-    problem = "torque did not switch on";
-  } else if (check.goal != hold) {
-    problem = "goal register does not match the hold position";
-  } else if (abs(check.position - hold) > config::kArmHoldTolerance) {
-    problem = "joint moved while arming";
-  }
-  if (problem != nullptr) {
-    disarm(Fault::None, problem);
-    return false;
+  monitor_ = false;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    JointChannel& ch = channels_[i];
+    if (!ch.settings.enabled) continue;
+    const uint8_t id = ch.def->servoId;
+    // Goal before torque: a goal write switches torque on by itself on SCS0009,
+    // so the joint may only ever be told to hold where it already is.
+    const int16_t hold = states[i].position;
+    ch.active = true;  // from here on, disarmAll() switches it off again
+    const char* problem = nullptr;
+    ServoState check;
+    if (!bus_.writeGoal(id, hold, config::kArmSpeed)) {
+      problem = "goal write failed";
+    } else if (!bus_.writeTorque(id, true)) {
+      problem = "torque write failed";
+    } else if (!bus_.readState(id, check)) {
+      problem = "no read-back after arming";
+    } else if (!check.torqueOn) {
+      problem = "torque did not switch on";
+    } else if (check.goal != hold) {
+      problem = "goal register does not match the hold position";
+    } else if (abs(check.position - hold) > config::kArmHoldTolerance) {
+      problem = "joint moved while arming";
+    }
+    if (problem != nullptr) {
+      disarmAll(Fault::None, i, problem);
+      return false;
+    }
+    ch.limiter.reset(hold);
+    ch.limiter.setLimits(config::kArmSpeed, ch.settings.amax);
+    ch.model.reset(hold);
+    ch.goal = ch.reference = hold;
+    ch.supervisor.reset();
   }
 
   armed_ = true;
   state_ = TeleopState::Align;
-  limiter_.reset(hold);
-  goal_ = hold;
-  jointSupervisor_.reset();
   supplySupervisor_.reset();
   lastFault_ = Fault::None;
-  message("armed, holding %d -> ALIGN", hold);
+  lastFaultJoint_ = 0;
+  message("armed %u joint(s), holding -> ALIGN (keep the glove still)", enabled);
   return true;
 }
 
-void TeleopController::disarm(Fault fault, const char* reason) {
+void TeleopController::disarmAll(Fault fault, int jointIndex, const char* reason) {
   armed_ = false;  // first, so no goal can follow
   state_ = TeleopState::Idle;
-  const uint8_t id = joint_.servoId;
-  bus_.syncTorqueOff(&id, 1);
-  bus_.writeTorque(id, false);
-  ServoState check;
-  torqueOffConfirmed_ = bus_.readState(id, check) && !check.torqueOn;
+  uint8_t ids[teleop::kMaxJoints];
+  uint8_t n = 0;
+  for (const JointChannel& ch : channels_) {
+    if (ch.active || ch.settings.enabled) ids[n++] = ch.def->servoId;
+  }
+  bool confirmed = true;
+  if (n > 0) {
+    bus_.syncTorqueOff(ids, n);
+    for (uint8_t i = 0; i < n; ++i) {
+      bus_.writeTorque(ids[i], false);
+      ServoState check;
+      confirmed &= bus_.readState(ids[i], check) && !check.torqueOn;
+    }
+  }
+  for (JointChannel& ch : channels_) {
+    ch.active = false;
+    ch.supervisor.reset();
+  }
+  torqueOffConfirmed_ = confirmed;
   lastFault_ = fault;
-  jointSupervisor_.reset();
-  message("DISARM: %s; torque off %s", reason, torqueOffConfirmed_ ? "confirmed" : "NOT CONFIRMED");
+  lastFaultJoint_ = jointIndex >= 0 ? channels_[jointIndex].def->servoId : 0;
+  if (jointIndex >= 0) {
+    message("DISARM: %s (joint %u %s); torque off %s", reason, channels_[jointIndex].def->servoId,
+            channels_[jointIndex].def->name, confirmed ? "confirmed" : "NOT CONFIRMED");
+  } else {
+    message("DISARM: %s; torque off %s", reason, confirmed ? "confirmed" : "NOT CONFIRMED");
+  }
 }
 
 void TeleopController::torqueOffAll(const char* reason) {
@@ -472,8 +780,11 @@ void TeleopController::torqueOffAll(const char* reason) {
       allConfirmed &= bus_.readState(id, check) && !check.torqueOn;
     }
   }
+  for (JointChannel& ch : channels_) {
+    ch.active = false;
+    ch.supervisor.reset();
+  }
   torqueOffConfirmed_ = allConfirmed;
-  jointSupervisor_.reset();
   message("%s: torque off on all servos%s", reason, allConfirmed ? "" : " (NOT CONFIRMED)");
 }
 
@@ -492,27 +803,39 @@ void TeleopController::publish() {
     }
   }
 
-  Snapshot s;
+  Snapshot& s = staging_;
   s.cycle = cycle_;
   s.uptimeMs = millis();
   s.state = state_;
   s.armed = armed_;
   s.lastFault = lastFault_;
+  s.lastFaultJoint = lastFaultJoint_;
   s.torqueOffConfirmed = torqueOffConfirmed_;
   s.echo = port_.echo();
-  s.encFresh = encFresh_;
-  s.encRaw = encRaw_;
-  s.exoCounts = exoCounts_;
-  s.exoFilteredCounts = exoFiltered_;
-  s.target = target_;
-  s.goal = goal_;
-  s.speedRegister = speedRegister_;
-  s.goalSent = goalSent_;
-  s.servoOk = servoOk_;
-  s.servo = servo_;
-  s.joint = joint_;
-  s.exoRefSet = exoRefSet_;
-  s.params = params_;
+  s.monitor = monitor_;
+  s.global = global_;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    const JointChannel& ch = channels_[i];
+    JointSnapshot& j = s.joints[i];
+    j.settings = ch.settings;
+    j.ready = teleop::jointReady(ch.settings, *ch.def, config::kEncoderCount);
+    j.active = ch.active;
+    j.refCaptured = ch.refCaptured;
+    j.encFresh = ch.encFresh;
+    j.encRaw = ch.encRaw;
+    j.exoCounts = ch.exoCounts;
+    j.exoFilteredCounts = ch.exoFiltered;
+    j.target = ch.target;
+    j.goal = ch.goal;
+    j.reference = ch.reference;
+    j.speedRegister = ch.speedRegister;
+    j.goalSent = ch.goalSent;
+    j.servoOk = ch.servoOk;
+    j.servo = ch.servo;
+    j.jumpRejects = ch.jumpRejects;
+    s.monitorPosition[i] = monitorPosition_[i];
+    s.monitorOk[i] = monitorOk_[i];
+  }
   s.timing = timing_;
   s.port = port_.stats();
   s.encoderCycle = encoders_.stats();

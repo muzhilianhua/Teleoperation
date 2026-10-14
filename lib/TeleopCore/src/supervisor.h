@@ -74,9 +74,13 @@ class JointSupervisor {
   void setConfig(const SupervisorConfig& config) { config_ = config; }
   const SupervisorConfig& config() const { return config_; }
 
-  // armed: firmware believes torque is on. setpoint: goal sent last cycle.
+  // armed: firmware believes torque is on. goal: position sent last cycle.
+  // reference: where a servo moving at its measured capability would be
+  // (a rate limiter chasing the goal at vsat). The tracking check flags only
+  // lag beyond that model, lag = |goal - position| - |goal - reference|, so a
+  // goal that outruns the servo's physical speed is not a fault by itself.
   // Returns the first fault found this cycle (None if healthy).
-  Fault update(const ServoSample& sample, bool armed, float setpoint, uint32_t nowMs);
+  Fault update(const ServoSample& sample, bool armed, float goal, float reference, uint32_t nowMs);
   void reset();
   uint8_t consecutiveFailures() const { return failures_; }
 

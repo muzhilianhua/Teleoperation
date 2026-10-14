@@ -1,24 +1,16 @@
 #include "console.h"
 
-#include <ctype.h>
-#include <stdlib.h>
-#include <string.h>
+#include <command_parser.h>
+
+using teleop::Verb;
 
 namespace {
 
 constexpr uint32_t kPollMs = 5;
 constexpr uint32_t kPlotPeriodMs = 20;  // 50 Hz Teleplot
+constexpr TickType_t kPostWait = pdMS_TO_TICKS(200);
 
-struct ParamName {
-  const char* key;
-  ParamId id;
-};
-
-constexpr ParamName kParams[] = {
-    {"sa", ParamId::ServoA},       {"sb", ParamId::ServoB},   {"vmax", ParamId::MaxSpeed},
-    {"amax", ParamId::Acceleration}, {"lead", ParamId::LeadMs}, {"mincut", ParamId::MinCutoff},
-    {"beta", ParamId::Beta},
-};
+char dumpBuffer[3072];
 
 const char* encoderStateShort(AS5048BChannelState state) {
   switch (state) {
@@ -29,23 +21,31 @@ const char* encoderStateShort(AS5048BChannelState state) {
   return "?";
 }
 
+int jointIndex(uint8_t servoId) {
+  return teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
+}
+
 }  // namespace
 
 void Console::startTask() {
-  xTaskCreatePinnedToCore(taskEntry, "console", 6144, this, 1, nullptr, config::kConsoleCore);
+  xTaskCreatePinnedToCore(taskEntry, "console", 8192, this, 1, nullptr, config::kConsoleCore);
 }
 
 void Console::taskEntry(void* arg) { static_cast<Console*>(arg)->run(); }
 
-void Console::run() {
+void Console::drainMessages() {
   char text[160];
+  while (controller_.popMessage(text, sizeof(text))) {
+    Serial.print("[ctl] ");
+    Serial.println(text);
+  }
+}
+
+void Console::run() {
   Serial.println();
-  Serial.println("Teleoperation M0 ready. Type `help`.");
+  Serial.println("Teleoperation M1 ready. Type `help`.");
   for (;;) {
-    while (controller_.popMessage(text, sizeof(text))) {
-      Serial.print("[ctl] ");
-      Serial.println(text);
-    }
+    drainMessages();
     while (Serial.available() > 0) {
       const char c = static_cast<char>(Serial.read());
       if (c == '\r') continue;
@@ -53,128 +53,127 @@ void Console::run() {
         line_[lineLength_] = '\0';
         handleLine(line_);
         lineLength_ = 0;
+        drainMessages();  // keep replies in step with pasted multi-line input
       } else if (lineLength_ + 1 < sizeof(line_)) {
         line_[lineLength_++] = c;
       }
     }
-    if (plotting_ && millis() - lastPlotMs_ >= kPlotPeriodMs) {
-      lastPlotMs_ = millis();
+    const uint32_t now = millis();
+    if (plotJoint_ != 0 && now - lastPlotMs_ >= kPlotPeriodMs) {
+      lastPlotMs_ = now;
       plot();
+    }
+    if (now - lastMonitorMs_ >= config::kMonitorPeriodMs) {
+      lastMonitorMs_ = now;
+      controller_.snapshot(snapshot_);
+      if (snapshot_.monitor) printMonitorRow();
     }
     vTaskDelay(pdMS_TO_TICKS(kPollMs));
   }
 }
 
-void Console::handleLine(char* line) {
-  for (char* p = line; *p; ++p) *p = static_cast<char>(tolower(*p));
-  char* save = nullptr;
-  const char* cmd = strtok_r(line, " \t", &save);
-  if (cmd == nullptr) return;
-  const char* arg1 = strtok_r(nullptr, " \t", &save);
-  const char* arg2 = strtok_r(nullptr, " \t", &save);
-
-  Command command;
-  if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) {
-    printHelp();
-  } else if (!strcmp(cmd, "status")) {
-    printStatus();
-  } else if (!strcmp(cmd, "stats")) {
-    if (arg1 != nullptr && !strcmp(arg1, "reset")) {
-      command.type = CommandType::ResetStats;
-      controller_.post(command);
-    } else {
-      printStats();
-    }
-  } else if (!strcmp(cmd, "enc")) {
-    printEncoders();
-  } else if (!strcmp(cmd, "ping")) {
-    command.type = CommandType::Ping;
-    controller_.post(command);
-  } else if (!strcmp(cmd, "arm")) {
-    command.type = CommandType::Arm;
-    controller_.post(command);
-  } else if (!strcmp(cmd, "disarm")) {
-    command.type = CommandType::Disarm;
-    controller_.post(command);
-  } else if (!strcmp(cmd, "x")) {
-    command.type = CommandType::Estop;
-    controller_.post(command);
-  } else if (!strcmp(cmd, "exo") && arg1 != nullptr && (!strcmp(arg1, "a") || !strcmp(arg1, "b"))) {
-    command.type = arg1[0] == 'a' ? CommandType::CaptureExoA : CommandType::CaptureExoB;
-    controller_.post(command);
-  } else if (!strcmp(cmd, "set") && arg1 != nullptr && arg2 != nullptr) {
-    handleSet(arg1, arg2);
-  } else if (!strcmp(cmd, "plot") && arg1 != nullptr) {
-    plotting_ = !strcmp(arg1, "on");
-    Serial.printf("plot %s\n", plotting_ ? "on" : "off");
-  } else {
-    Serial.printf("unknown command: %s (type `help`)\n", cmd);
-  }
-}
-
-void Console::handleSet(const char* key, const char* value) {
-  char* end = nullptr;
-  const float v = strtof(value, &end);
-  if (end == value || *end != '\0') {
-    Serial.printf("not a number: %s\n", value);
+void Console::handleLine(const char* line) {
+  teleop::ParsedCommand cmd;
+  const char* error = teleop::parseCommand(line, cmd);
+  if (error != nullptr) {
+    Serial.printf("error: %s\n", error);
     return;
   }
-  for (const ParamName& p : kParams) {
-    if (!strcmp(p.key, key)) {
-      Command command;
-      command.type = CommandType::SetParam;
-      command.param = p.id;
-      command.value = v;
-      controller_.post(command);
+  switch (cmd.verb) {
+    case Verb::None:
+    case Verb::Comment: return;
+    case Verb::Help: printHelp(); return;
+    case Verb::Status: printStatus(); return;
+    case Verb::Stats: printStats(); return;
+    case Verb::Enc: printEncoders(); return;
+    case Verb::Joints: printJoints(); return;
+    case Verb::Dump: printDump(); return;
+    case Verb::Plot:
+      if (cmd.flag && jointIndex(cmd.joint) < 0) {
+        Serial.printf("error: no joint with servo id %u\n", cmd.joint);
+        return;
+      }
+      plotJoint_ = cmd.flag ? cmd.joint : 0;
+      Serial.printf("plot %s\n", plotJoint_ ? "on" : "off");
       return;
-    }
+    default:
+      if (!controller_.post(cmd, kPostWait)) Serial.println("error: control task busy, command dropped");
+      return;
   }
-  Serial.printf("unknown parameter: %s\n", key);
 }
 
 void Console::printHelp() {
   Serial.println(
-      "commands:\n"
-      "  status            state, joint calibration, servo readings\n"
-      "  stats [reset]     loop timing, bus and encoder statistics\n"
-      "  enc               all encoder channels\n"
-      "  ping              scan servo ids 1-8 (disarmed only)\n"
-      "  arm | disarm      torque on (hold, then ALIGN -> FOLLOW) / torque off\n"
-      "  x                 E-stop: torque off on every servo (BOOT button does the same)\n"
-      "  exo a | exo b     capture the current encoder reading as endpoint A / B\n"
-      "  set <key> <val>   sa sb (servo endpoints), vmax amax, lead (ms), mincut beta\n"
-      "  plot on|off       Teleplot traces at 50 Hz");
+      "joints are addressed by servo id (1-8)\n"
+      "  status | joints | enc | stats [reset]   inspect\n"
+      "  monitor on|off       raw encoders + all servo positions at 10 Hz (disarmed)\n"
+      "  ping                 scan servo ids (disarmed)\n"
+      "  arm | disarm | x     torque on for enabled joints / off / E-stop (BOOT button too)\n"
+      "  set <j> enc <n|none> assign encoder #n      set <j> on|off   enable joint\n"
+      "  cal <j> a|b          capture exo endpoint   cal <j> hand a|b servo endpoint (move by hand)\n"
+      "  set <j> exo <rawA> <rawB> | servo <a> <b>   enter endpoints directly\n"
+      "  set <j> vmax|amax|vsat|trk <n>             per-joint speed / tracking parameters\n"
+      "  set lead|mincut|beta|jump <v>              global parameters\n"
+      "  save | load | defaults | dump              NVS store / reload / reset (RAM) / export\n"
+      "  plot <j> on | plot off                     Teleplot traces at 50 Hz");
 }
 
 void Console::printStatus() {
   controller_.snapshot(snapshot_);
   const Snapshot& s = snapshot_;
-  const teleop::JointMap& j = s.joint;
-  Serial.printf("state %s  armed %d  last fault: %s  torque-off confirmed %d  echo %d\n",
-                teleopStateToString(s.state), s.armed, teleop::faultToString(s.lastFault),
-                s.torqueOffConfirmed, s.echo);
-  Serial.printf("joint %s: encoder #%u -> servo %u, travel [%d, %d]\n", j.name, j.encoderIndex,
-                j.servoId, j.servoMin, j.servoMax);
-  Serial.printf("  exo  ref %u%s  A %d  B %d (%.1f deg)  calibrated %d\n", j.exoRef,
-                s.exoRefSet ? "" : " (unset)", j.exoA, j.exoB,
-                (j.exoB - j.exoA) * teleop::kDegreesPerCount, j.exoCalibrated());
-  Serial.printf("  servo A %d  B %d  valid %d  -> ready %d\n", j.servoA, j.servoB,
-                j.servoRangeValid(), j.ready());
-  Serial.printf("encoder fresh %d raw %u  exo %.0f (%.2f deg) filtered %.1f\n", s.encFresh,
-                s.encRaw, s.exoCounts, s.exoCounts * teleop::kDegreesPerCount, s.exoFilteredCounts);
-  Serial.printf("target %.1f  goal %.1f  speed reg %u  sent %d\n", s.target, s.goal,
-                s.speedRegister, s.goalSent);
-  if (s.servoOk) {
-    const ServoState& v = s.servo;
-    Serial.printf("servo pos %d goal %d torque %d load %.1f%% %.1fV %dC status 0x%02X err 0x%02X\n",
-                  v.position, v.goal, v.torqueOn, v.loadPct, v.voltage, v.temperatureC, v.status,
-                  v.errorByte);
-  } else {
-    Serial.println("servo: no reply this cycle");
+  Serial.printf("state %s  armed %d  monitor %d  echo %d  torque-off confirmed %d\n",
+                teleopStateToString(s.state), s.armed, s.monitor, s.echo, s.torqueOffConfirmed);
+  if (s.lastFault != teleop::Fault::None) {
+    Serial.printf("last fault: %s (joint %u)\n", teleop::faultToString(s.lastFault), s.lastFaultJoint);
   }
-  const MotionParams& p = s.params;
-  Serial.printf("params vmax %.0f amax %.0f lead %.0fms mincut %.3f beta %.4f\n", p.maxSpeed,
-                p.acceleration, p.leadMs, p.minCutoffHz, p.beta);
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    const JointSnapshot& j = s.joints[i];
+    if (!j.settings.enabled) continue;
+    const teleop::JointDefaults& d = config::kJoints[i];
+    Serial.printf("j%u %-13s exo %7.2f deg  target %6.1f  goal %6.1f  ref %6.1f  spd %4u",
+                  d.servoId, d.name, j.exoFilteredCounts * teleop::kDegreesPerCount, j.target,
+                  j.goal, j.reference, j.speedRegister);
+    if (j.servoOk) {
+      Serial.printf("  pos %4d tq %d load %5.1f%% %.1fV %dC%s\n", j.servo.position, j.servo.torqueOn,
+                    j.servo.loadPct, j.servo.voltage, j.servo.temperatureC, j.encFresh ? "" : "  ENC!");
+    } else {
+      Serial.printf("  servo: no reply%s\n", j.encFresh ? "" : "  ENC!");
+    }
+  }
+  const teleop::GlobalSettings& g = s.global;
+  Serial.printf("global lead %.0f ms  mincut %.3f Hz  beta %.4f  jump %.0f deg\n", g.leadMs,
+                g.minCutoffHz, g.beta, g.jumpDeg);
+}
+
+void Console::printJoints() {
+  controller_.snapshot(snapshot_);
+  Serial.println("id name           on enc  exo span   servo A..B   travel     vmax amax  vsat trk  ready");
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    const teleop::JointDefaults& d = config::kJoints[i];
+    const JointSnapshot& j = snapshot_.joints[i];
+    const teleop::JointSettings& s = j.settings;
+    char enc[6];
+    if (s.encoderIndex == teleop::kNoEncoder) {
+      strlcpy(enc, "--", sizeof(enc));
+    } else {
+      snprintf(enc, sizeof(enc), "%u", s.encoderIndex);
+    }
+    char exo[12];
+    if (teleop::exoCalibrated(s)) {
+      snprintf(exo, sizeof(exo), "%6.1f", s.exoB * teleop::kDegreesPerCount);
+    } else {
+      strlcpy(exo, j.refCaptured ? "  A only" : "     --", sizeof(exo));
+    }
+    char servo[16];
+    if (teleop::servoCalibrated(s, d)) {
+      snprintf(servo, sizeof(servo), "%4d..%-4d", s.servoA, s.servoB);
+    } else {
+      strlcpy(servo, "    --    ", sizeof(servo));
+    }
+    Serial.printf("%2u %-14s %d  %-4s %-9s  %s  %4d..%-4d %4u %5u %4u %4u  %s\n", d.servoId, d.name,
+                  s.enabled, enc, exo, servo, d.travelMin, d.travelMax, s.vmax, s.amax, s.vsat,
+                  s.trackSteps, j.ready ? "yes" : "no");
+  }
 }
 
 void Console::printStats() {
@@ -194,27 +193,76 @@ void Console::printStats() {
   Serial.printf("encoder pass avg %lu us max %lu us, skew max %lu us\n",
                 (unsigned long)e.averageCycleUs(), (unsigned long)e.maxCycleUs,
                 (unsigned long)e.maxSkewUs);
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    const JointSnapshot& j = snapshot_.joints[i];
+    if (j.settings.enabled && j.jumpRejects > 0) {
+      Serial.printf("joint %u: %lu encoder samples rejected by the jump guard\n",
+                    config::kJoints[i].servoId, (unsigned long)j.jumpRejects);
+    }
+  }
 }
 
 void Console::printEncoders() {
   controller_.snapshot(snapshot_);
-  Serial.println("#  addr  state  valid  angle(deg)  agc  magnet  errors");
-  for (uint8_t i = 0; i < config::kEncoderCount; ++i) {
-    const EncoderSummary& e = snapshot_.encoders[i];
-    Serial.printf("%u  0x%02X  %-5s  %d      %7.2f    %3u  %d       %lu\n", i, e.address,
-                  encoderStateShort(e.state), e.valid, e.angle * teleop::kDegreesPerCount, e.agc,
-                  e.magnetOk, (unsigned long)e.errors);
+  Serial.println("#  addr  state  valid  angle(deg)  agc  magnet  errors  joint");
+  for (uint8_t e = 0; e < config::kEncoderCount; ++e) {
+    const EncoderSummary& enc = snapshot_.encoders[e];
+    int joint = 0;
+    for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+      if (snapshot_.joints[i].settings.encoderIndex == e) joint = config::kJoints[i].servoId;
+    }
+    Serial.printf("%u  0x%02X  %-5s  %d      %7.2f    %3u  %d       %-6lu  %s%d\n", e, enc.address,
+                  encoderStateShort(enc.state), enc.valid, enc.angle * teleop::kDegreesPerCount,
+                  enc.agc, enc.magnetOk, (unsigned long)enc.errors, joint ? "j" : "-", joint);
   }
 }
 
-void Console::plot() {
+void Console::printDump() {
   controller_.snapshot(snapshot_);
-  const Snapshot& s = snapshot_;
-  Serial.printf(">exo_deg:%.2f\n>exo_filt_deg:%.2f\n>target:%.1f\n>goal:%.1f\n",
-                s.exoCounts * teleop::kDegreesPerCount,
-                s.exoFilteredCounts * teleop::kDegreesPerCount, s.target, s.goal);
-  if (s.servoOk) {
-    Serial.printf(">present:%d\n>load:%.1f\n>speed_reg:%u\n", s.servo.position, s.servo.loadPct,
-                  s.speedRegister);
+  teleop::JointSettings joints[teleop::kMaxJoints];
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) joints[i] = snapshot_.joints[i].settings;
+  const size_t n = teleop::formatDump(joints, config::kJoints, teleop::kMaxJoints, snapshot_.global,
+                                      dumpBuffer, sizeof(dumpBuffer));
+  if (n == 0) {
+    Serial.println("error: dump buffer too small");
+    return;
+  }
+  Serial.print(dumpBuffer);
+}
+
+void Console::printMonitorRow() {
+  // Assumes snapshot_ is fresh (run() refreshes it right before calling).
+  Serial.print("enc");
+  for (uint8_t e = 0; e < config::kEncoderCount; ++e) {
+    const EncoderSummary& enc = snapshot_.encoders[e];
+    if (enc.state == AS5048BChannelState::Offline || !enc.valid) {
+      Serial.printf(" %u:  ---  ", e);
+    } else {
+      Serial.printf(" %u:%6.1f%c", e, enc.angle * teleop::kDegreesPerCount,
+                    enc.state == AS5048BChannelState::NoMagnet ? 'M' : ' ');
+    }
+  }
+  Serial.print(" | servo");
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    if (snapshot_.monitorOk[i]) {
+      Serial.printf(" %u:%4d", config::kJoints[i].servoId, snapshot_.monitorPosition[i]);
+    } else {
+      Serial.printf(" %u: -- ", config::kJoints[i].servoId);
+    }
+  }
+  Serial.println();
+}
+
+void Console::plot() {
+  const int i = jointIndex(plotJoint_);
+  if (i < 0) return;
+  controller_.snapshot(snapshot_);
+  const JointSnapshot& j = snapshot_.joints[i];
+  Serial.printf(">exo_deg:%.2f\n>exo_filt_deg:%.2f\n>target:%.1f\n>goal:%.1f\n>ref:%.1f\n",
+                j.exoCounts * teleop::kDegreesPerCount, j.exoFilteredCounts * teleop::kDegreesPerCount,
+                j.target, j.goal, j.reference);
+  if (j.servoOk) {
+    Serial.printf(">present:%d\n>load:%.1f\n>speed_reg:%u\n", j.servo.position, j.servo.loadPct,
+                  j.speedRegister);
   }
 }

@@ -1,5 +1,6 @@
-// USB-CDC text console (M0): line commands in, event messages, status tables
-// and Teleplot traces out. Runs on the core that does not host the control loop.
+// USB-CDC text console: line commands in (parsed by teleop::parseCommand),
+// event messages, tables, monitor rows and Teleplot traces out. Runs on the
+// core that does not host the control loop.
 
 #pragma once
 
@@ -15,18 +16,22 @@ class Console {
  private:
   static void taskEntry(void* arg);
   void run();
-  void handleLine(char* line);
-  void handleSet(const char* key, const char* value);
+  void drainMessages();
+  void handleLine(const char* line);
   void printHelp();
   void printStatus();
   void printStats();
   void printEncoders();
+  void printJoints();
+  void printDump();
+  void printMonitorRow();
   void plot();
 
   TeleopController& controller_;
   Snapshot snapshot_;
-  char line_[96];
+  char line_[128];
   size_t lineLength_ = 0;
-  bool plotting_ = false;
+  uint8_t plotJoint_ = 0;  // servo id, 0 = off
   uint32_t lastPlotMs_ = 0;
+  uint32_t lastMonitorMs_ = 0;
 };

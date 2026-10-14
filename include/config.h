@@ -1,9 +1,12 @@
-// Build-time configuration for the M0 single-joint teleoperation firmware.
-// Values marked [bringup] come from servo_bringup/dexhand_servo/config.py
-// (measured on this hand) and should stay in sync with it.
+// Build-time configuration for the teleoperation firmware.
+// Values marked [bringup] come from servo_bringup (measured on this hand) and
+// should stay in sync with it. Operator calibration is not here: it is entered
+// on the console and stored in NVS.
 
 #pragma once
 
+#include <config_blob.h>
+#include <joint_config.h>
 #include <stdint.h>
 
 namespace config {
@@ -37,19 +40,37 @@ constexpr uint32_t kWatchdogTimeoutS = 2;
 constexpr uint8_t kControlCore = 1;
 constexpr uint8_t kConsoleCore = 0;
 
-// ---- M0 joint: ID 1 triple_pip, the freest-moving joint [bringup] --------
-constexpr const char* kJointName = "triple_pip";
-constexpr uint8_t kJointEncoderIndex = 0;  // 0x40
-constexpr uint8_t kJointServoId = 1;
-constexpr int16_t kJointServoMin = 350;    // [bringup] JOINTS id 1 min
-constexpr int16_t kJointServoMax = 730;    // [bringup] JOINTS id 1 max
+// ---- Joint table: one entry per hand servo --------------------------------
+// Travel limits: [bringup] JOINTS (config.py:61-71). They can only be changed
+// here, never from the console.
+// vmax ~ 1.2 x the faster-direction saturation speed and vsat ~ 0.9 x the
+// slower-direction one, from [bringup] reports/verify_motion_*.json speed
+// sweeps. Joints 3/4/5/7 are force-limited (friction / tendon preload, 2-10
+// steps/s): their values are placeholders until the mechanics are fixed, and
+// their tracking check will trip until then.
+// Encoder assignment and enable flags below are only boot defaults; the
+// operator sets them with `set <j> enc/on` and stores them in NVS.
+constexpr uint16_t kAcceleration = 8000;  // steps/s^2
+inline constexpr teleop::JointDefaults kJoints[teleop::kMaxJoints] = {
+    // id  name             min  max  vmax vsat amax           encoder            enabled
+    {1, "triple_pip",      350, 730, 660, 245, kAcceleration, 5,                 true},
+    {2, "triple_dip",      600, 890, 660, 370, kAcceleration, teleop::kNoEncoder, false},
+    {3, "index_pip",       250, 600, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
+    {4, "index_dip",       250, 590, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
+    {5, "index_mcp",       435, 600, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
+    {6, "thumb_mcp_rot",   300, 700, 690, 365, kAcceleration, teleop::kNoEncoder, false},
+    {7, "thumb_mcp",       650, 900, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
+    {8, "thumb_ip",         20, 280, 380, 230, kAcceleration, teleop::kNoEncoder, false},
+};
+constexpr teleop::ServoBackend kServoBackend = teleop::ServoBackend::Scs;
 
-// ---- Motion defaults (runtime-adjustable with `set`) ----------------------
-constexpr float kMaxSpeed = 200.0f;       // steps/s, [bringup] speed sweep suggests 190-266 for id 1
-constexpr float kAcceleration = 2000.0f;  // steps/s^2
-constexpr float kLeadMs = 0.0f;           // look-ahead against stick-slip, tuned in M4
-constexpr float kFilterMinCutoffHz = 1.0f;
-constexpr float kFilterBeta = 0.01f;      // 1/deg
+// ---- Global defaults (runtime-adjustable with `set`, stored in NVS) -------
+inline constexpr teleop::GlobalSettings kGlobalDefaults = {
+    0.0f,   // leadMs: look-ahead against stick-slip, tuned in M4
+    1.0f,   // minCutoffHz
+    0.01f,  // beta, 1/deg
+    25.0f,  // jumpDeg: 2500 deg/s at 100 Hz, beyond any human finger
+};
 constexpr float kFilterDCutoffHz = 1.0f;
 constexpr uint16_t kArmSpeed = 50;        // [bringup] arm_speed, also the ALIGN speed limit
 constexpr int16_t kArmHoldTolerance = 5;  // [bringup] arm_hold_tolerance
@@ -63,6 +84,8 @@ constexpr uint16_t kStreamSpeedCap = 1000;
 constexpr uint8_t kEncoderFailCycles = 3;    // consecutive bad reads -> HOLD
 constexpr uint32_t kHoldTimeoutMs = 3000;    // HOLD longer than this -> torque off
 constexpr uint32_t kHoldRecoverMs = 200;     // encoder healthy this long -> re-ALIGN
-constexpr int32_t kMinExoSpanCounts = 182;   // 4 deg: smaller A-B spans are rejected
+
+// ---- Monitor mode -----------------------------------------------------------
+constexpr uint32_t kMonitorPeriodMs = 100;   // console table rate
 
 }  // namespace config
