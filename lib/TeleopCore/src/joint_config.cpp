@@ -22,6 +22,7 @@ JointSettings defaultSettings(const JointDefaults& d) {
   s.amax = d.amax;
   s.vsat = d.vsat;
   s.trackSteps = 40;
+  s.gripSteps = 60;
   return s;
 }
 
@@ -45,6 +46,7 @@ const char* validateJoint(const JointSettings& s, const JointDefaults& d, uint8_
   if (!inRange(s.vsat, 1, 1000)) return "vsat outside 1..1000";
   if (!inRange(s.amax, 10, 20000)) return "amax outside 10..20000";
   if (!inRange(s.trackSteps, 5, 1000)) return "trk outside 5..1000";
+  if (s.gripSteps > 400) return "grip outside 0..400";
   return nullptr;
 }
 
@@ -53,6 +55,7 @@ const char* validateGlobal(const GlobalSettings& g) {
   if (!(g.minCutoffHz >= 0.01f && g.minCutoffHz <= 30.0f)) return "mincut outside 0.01..30 Hz";
   if (!(g.beta >= 0.0f && g.beta <= 10.0f)) return "beta outside 0..10";
   if (!(g.jumpDeg >= 1.0f && g.jumpDeg <= 180.0f)) return "jump outside 1..180 deg";
+  if (!(g.gripLoadPct >= 20.0f && g.gripLoadPct <= 95.0f)) return "gripload outside 20..95 %";
   return nullptr;
 }
 

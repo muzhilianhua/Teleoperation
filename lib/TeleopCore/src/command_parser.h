@@ -51,10 +51,13 @@ enum class SetKey : uint8_t {
   AMax,
   VSat,
   Track,
+  Grip,
   Lead,       // global
   MinCutoff,  // global
   Beta,       // global
   Jump,       // global
+  GripLoad,   // global
+  LoadTrip,   // global, values[0] = 1 (on) / 0 (off)
 };
 
 struct ParsedCommand {

@@ -14,6 +14,7 @@
 #include <AS5048BGroup.h>
 #include <command_parser.h>
 #include <feetech_port.h>
+#include <grip_limiter.h>
 #include <joint_config.h>
 #include <jump_guard.h>
 #include <one_euro.h>
@@ -65,7 +66,10 @@ struct JointSnapshot {
   float exoCounts = 0.0f;          // unwrapped, relative to exoRef
   float exoFilteredCounts = 0.0f;
   float target = 0.0f;             // mapped servo position
-  float goal = 0.0f;               // rate-limited value sent to the servo
+  float goal = 0.0f;               // rate-limited target
+  float sentGoal = 0.0f;           // goal after the grip limiter: what the servo receives
+  float gripLead = 0.0f;           // current grip limiter lead (steps)
+  bool contact = false;            // grip limiter sees the finger pressing on something
   float reference = 0.0f;          // servo-capability model used by the tracking check
   uint16_t speedRegister = 0;
   bool goalSent = false;
@@ -121,6 +125,7 @@ class TeleopController {
     teleop::RateLimiter model;
     teleop::JumpGuard guard;
     teleop::JointSupervisor supervisor;
+    teleop::GripLimiter grip;
     JointState state = JointState::Off;
     teleop::Fault lastFault = teleop::Fault::None;
     bool refCaptured = false;
@@ -133,6 +138,8 @@ class TeleopController {
     float target = 0.0f;
     // Output path
     float goal = 0.0f;
+    float sentGoal = 0.0f;
+    bool contact = false;
     float reference = 0.0f;
     uint16_t speedRegister = 0;
     bool goalSent = false;

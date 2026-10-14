@@ -54,6 +54,9 @@ FaultScope faultScope(Fault fault);
 constexpr uint8_t kServoErrorVoltageBit = 0x01;  // status-packet error byte
 
 struct SupervisorConfig {
+  // Off: LoadTrip/LoadHard are never raised and only the servo's own overload
+  // protection (reported as ServoError) ends a high-load episode.
+  bool loadTripEnabled = true;
   float loadTripPct = 75.0f;
   uint32_t loadTripMs = 300;
   float loadHardPct = 80.0f;
@@ -77,6 +80,9 @@ struct ServoSample {
   int temperatureC = 0;
   uint8_t errorByte = 0;
   uint8_t status = 0;
+  // The grip limiter sees the finger pressing on an object: falling behind the
+  // goal is expected then, so the tracking check is suspended.
+  bool inContact = false;
 };
 
 class JointSupervisor {

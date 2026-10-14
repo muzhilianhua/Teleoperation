@@ -113,8 +113,9 @@ void Console::printHelp() {
       "  set <j> enc <n|none> assign encoder #n      set <j> on|off   enable joint\n"
       "  cal <j> a|b          capture exo endpoint   cal <j> hand a|b servo endpoint (move by hand)\n"
       "  set <j> exo <rawA> <rawB> | servo <a> <b>   enter endpoints directly\n"
-      "  set <j> vmax|amax|vsat|trk <n>             per-joint speed / tracking parameters\n"
-      "  set lead|mincut|beta|jump <v>              global parameters\n"
+      "  set <j> vmax|amax|vsat|trk|grip <n>        per-joint speed / tracking / grip lead (0 = off)\n"
+      "  set lead|mincut|beta|jump|gripload <v>     global parameters\n"
+      "  set loadtrip on|off                        firmware load trips (off: servo overload decides)\n"
       "  save | load | defaults | dump              NVS store / reload / reset (RAM) / export\n"
       "  limits check | limits write <j|all>        servo angle-limit registers vs travel (disarmed)\n"
       "  plot <j> on | plot off                     Teleplot traces at 50 Hz");
@@ -132,10 +133,10 @@ void Console::printStatus() {
     const JointSnapshot& j = s.joints[i];
     if (!j.settings.enabled && j.state == JointState::Off) continue;
     const teleop::JointDefaults& d = config::kJoints[i];
-    Serial.printf("j%u %-13s %-6s exo %7.2f deg  target %6.1f  goal %6.1f  ref %6.1f  spd %4u",
+    Serial.printf("j%u %-13s %-6s exo %7.2f deg  target %6.1f  goal %6.1f  sent %6.1f  grip %3.0f%s  spd %4u",
                   d.servoId, d.name, jointStateToString(j.state),
-                  j.exoFilteredCounts * teleop::kDegreesPerCount, j.target, j.goal, j.reference,
-                  j.speedRegister);
+                  j.exoFilteredCounts * teleop::kDegreesPerCount, j.target, j.goal, j.sentGoal,
+                  j.gripLead, j.contact ? "*" : " ", j.speedRegister);
     if (j.readAgeMs <= config::kServoCommStaleMs) {
       Serial.printf("  pos %4d tq %d load %5.1f%% %.1fV %dC%s\n", j.servo.position, j.servo.torqueOn,
                     j.servo.loadPct, j.servo.voltage, j.servo.temperatureC, j.encFresh ? "" : "  ENC!");
@@ -144,8 +145,9 @@ void Console::printStatus() {
     }
   }
   const teleop::GlobalSettings& g = s.global;
-  Serial.printf("global lead %.0f ms  mincut %.3f Hz  beta %.4f  jump %.0f deg\n", g.leadMs,
-                g.minCutoffHz, g.beta, g.jumpDeg);
+  Serial.printf("global lead %.0f ms  mincut %.3f Hz  beta %.4f  jump %.0f deg  gripload %.0f %%  loadtrip %s\n",
+                g.leadMs, g.minCutoffHz, g.beta, g.jumpDeg, g.gripLoadPct, g.loadTripEnabled ? "on" : "off");
+  Serial.println("(grip * = finger in contact, lead shrinking to hold the squeeze near gripload)");
 }
 
 void Console::printJoints() {
@@ -269,9 +271,10 @@ void Console::plot() {
   if (i < 0) return;
   controller_.snapshot(snapshot_);
   const JointSnapshot& j = snapshot_.joints[i];
-  Serial.printf(">exo_deg:%.2f\n>exo_filt_deg:%.2f\n>target:%.1f\n>goal:%.1f\n>ref:%.1f\n",
+  Serial.printf(">exo_deg:%.2f\n>exo_filt_deg:%.2f\n>target:%.1f\n>goal:%.1f\n>sent:%.1f\n>ref:%.1f\n"
+                ">grip_lead:%.0f\n",
                 j.exoCounts * teleop::kDegreesPerCount, j.exoFilteredCounts * teleop::kDegreesPerCount,
-                j.target, j.goal, j.reference);
+                j.target, j.goal, j.sentGoal, j.reference, j.gripLead);
   if (j.readAgeMs <= config::kServoCommStaleMs) {
     Serial.printf(">present:%d\n>load:%.1f\n>speed_reg:%u\n", j.servo.position, j.servo.loadPct,
                   j.speedRegister);

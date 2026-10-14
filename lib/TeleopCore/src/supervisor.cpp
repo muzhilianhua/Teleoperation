@@ -47,13 +47,14 @@ Fault JointSupervisor::update(const ServoSample& s, bool armed, float goal, floa
 
   const float load = fabsf(s.loadPct);
   // Evaluate every timer each cycle so their start times stay correct.
-  const bool hard = loadHard_.update(load >= config_.loadHardPct, nowMs, config_.loadHardMs);
-  const bool trip = loadTrip_.update(load >= config_.loadTripPct, nowMs, config_.loadTripMs);
+  const bool loadChecks = config_.loadTripEnabled;
+  const bool hard = loadHard_.update(loadChecks && load >= config_.loadHardPct, nowMs, config_.loadHardMs);
+  const bool trip = loadTrip_.update(loadChecks && load >= config_.loadTripPct, nowMs, config_.loadTripMs);
   const bool hot = overheat_.update(s.temperatureC >= config_.temperatureTripC, nowMs,
                                     config_.temperatureTripMs);
   const float lag = fabsf(goal - s.position) - fabsf(goal - reference);
-  const bool lagging =
-      armed && tracking_.update(lag > config_.trackingErrorSteps, nowMs, config_.trackingErrorMs);
+  const bool lagging = armed && tracking_.update(!s.inContact && lag > config_.trackingErrorSteps, nowMs,
+                                                 config_.trackingErrorMs);
   if (!armed) tracking_.reset();
 
   if (hard) return Fault::LoadHard;

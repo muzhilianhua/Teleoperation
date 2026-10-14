@@ -63,7 +63,7 @@ const char* blobStatusToString(BlobStatus status) {
     case BlobStatus::BadVersion: return "unsupported version";
     case BlobStatus::BadCrc: return "CRC mismatch";
     case BlobStatus::BadJointCount: return "joint count mismatch";
-    case BlobStatus::Migrated: return "migrated from version 1: new joints set to defaults";
+    case BlobStatus::Migrated: return "migrated from version 1: new joints and fields set to defaults";
     case BlobStatus::BackendMismatch: return "saved for another servo series: servo endpoints cleared";
     case BlobStatus::InvalidJoint: return "invalid joint settings reset to defaults";
     case BlobStatus::InvalidGlobal: return "invalid global settings reset to defaults";
@@ -106,11 +106,14 @@ size_t packConfig(const JointSettings* joints, uint8_t count, const GlobalSettin
     w.u16(s.amax);
     w.u16(s.vsat);
     w.u16(s.trackSteps);
+    w.u16(s.gripSteps);
   }
   w.f32(global.leadMs);
   w.f32(global.minCutoffHz);
   w.f32(global.beta);
   w.f32(global.jumpDeg);
+  w.f32(global.gripLoadPct);
+  w.u8(global.loadTripEnabled ? 1 : 0);
   w.u32(crc32(out, kBlobSize - 4));
   return kBlobSize;
 }
@@ -125,14 +128,18 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, ServoBackend backend,
   if (r.u32() != kBlobMagic) return BlobStatus::BadMagic;
   const uint16_t version = r.u16();
   uint8_t savedCount = 0;
+  size_t expectedLength = 0;
   if (version == kBlobVersion) {
     savedCount = kMaxJoints;
+    expectedLength = kBlobSize;
   } else if (version == 1) {
     savedCount = kV1JointCount;
+    expectedLength = kV1BlobSize;
   } else {
     return BlobStatus::BadVersion;
   }
-  if (length != blobSizeFor(savedCount)) return BlobStatus::BadSize;
+  const bool v1 = version == 1;
+  if (length != expectedLength) return BlobStatus::BadSize;
   Reader crcReader(in + length - 4);
   if (crcReader.u32() != crc32(in, length - 4)) return BlobStatus::BadCrc;
   const uint8_t savedBackend = r.u8();
@@ -142,6 +149,7 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, ServoBackend backend,
   for (uint8_t i = savedCount; i < count; ++i) loaded[i] = defaultSettings(defaults[i]);
   for (uint8_t i = 0; i < savedCount; ++i) {
     JointSettings& s = loaded[i];
+    s = defaultSettings(defaults[i]);  // fields an older version did not store
     s.enabled = r.u8() != 0;
     s.encoderIndex = r.u8();
     s.exoRef = r.u16();
@@ -152,14 +160,19 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, ServoBackend backend,
     s.amax = r.u16();
     s.vsat = r.u16();
     s.trackSteps = r.u16();
+    if (!v1) s.gripSteps = r.u16();
   }
-  GlobalSettings g;
+  GlobalSettings g = globalDefaults;
   g.leadMs = r.f32();
   g.minCutoffHz = r.f32();
   g.beta = r.f32();
   g.jumpDeg = r.f32();
+  if (!v1) {
+    g.gripLoadPct = r.f32();
+    g.loadTripEnabled = r.u8() != 0;
+  }
 
-  BlobStatus status = savedCount < count ? BlobStatus::Migrated : BlobStatus::Ok;
+  BlobStatus status = v1 ? BlobStatus::Migrated : BlobStatus::Ok;
   if (savedBackend != static_cast<uint8_t>(backend)) {
     status = BlobStatus::BackendMismatch;
     for (uint8_t i = 0; i < count; ++i) loaded[i].servoA = loaded[i].servoB = defaults[i].travelMin;

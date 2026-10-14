@@ -43,13 +43,20 @@ struct JointSettings {
   uint16_t amax = 0;
   uint16_t vsat = 0;
   uint16_t trackSteps = 40;
+  // Grip limiter: largest lead of the goal over the measured position, in
+  // steps. Contact shrinks it to hold the squeeze near gripLoadPct. 0 = off.
+  uint16_t gripSteps = 60;
 };
 
 struct GlobalSettings {
   float leadMs = 0.0f;
   float minCutoffHz = 1.0f;
   float beta = 0.01f;
-  float jumpDeg = 25.0f;  // largest plausible exo change per control cycle
+  float jumpDeg = 25.0f;      // largest plausible exo change per control cycle
+  float gripLoadPct = 60.0f;  // sustained squeeze target, below the servo's 80 % / 1 s overload cut-out
+  // Firmware load trips (75 % / 0.3 s, 80 % / 0.1 s). Off by default so a
+  // grasp can load the servo; the servo's own overload protection then decides.
+  bool loadTripEnabled = false;
 };
 
 JointSettings defaultSettings(const JointDefaults& defaults);

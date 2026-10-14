@@ -17,6 +17,15 @@ namespace {
 // so the capability model only needs a token acceleration limit.
 constexpr float kModelAcceleration = 20000.0f;
 
+// Why a servo reported an error, for the disarm message. The overload bit is
+// the servo's own protection (load > 80 % for 1 s) giving up on a squeeze.
+void describeServoError(const ServoState& st, char* out, size_t length) {
+  const uint8_t e = st.errorByte;
+  snprintf(out, length, "servo reports%s%s%s%s%s", (e & 0x20) ? " overload (own protection)" : "",
+           (e & 0x08) ? " over-current" : "", (e & 0x04) ? " overheat" : "",
+           (e & 0x02) ? " angle-sensor error" : "", (e == 0 && st.status) ? " a status flag" : "");
+}
+
 const char* notReadyReason(const teleop::JointSettings& s, const teleop::JointDefaults& d) {
   if (!teleop::travelDefined(d)) return "travel not defined in config.h";
   if (!s.enabled) return "disabled";
@@ -137,7 +146,12 @@ void TeleopController::applyRuntimeParams(JointChannel& ch) {
   ch.guard.setMaxStep(global_.jumpDeg);
   teleop::SupervisorConfig sc;
   sc.trackingErrorSteps = ch.settings.trackSteps;
+  sc.loadTripEnabled = global_.loadTripEnabled;
   ch.supervisor.setConfig(sc);
+  teleop::GripLimiter::Config gc;
+  gc.maxLead = ch.settings.gripSteps;
+  gc.loadPct = global_.gripLoadPct;
+  ch.grip.setConfig(gc);
   ch.limiter.setTravel(ch.def->travelMin, ch.def->travelMax);
   const float speed = ch.state == JointState::Align ? config::kArmSpeed : ch.settings.vmax;
   ch.limiter.setLimits(speed, ch.settings.amax);
@@ -298,8 +312,10 @@ void TeleopController::readServos(uint32_t nowMs) {
     if (ch.servoOk) {
       ch.servo = st;
       ch.lastGoodReadMs = nowMs;
+      ch.contact = ch.armed() && ch.grip.update(st.loadPct, st.speed);
     }
     teleop::ServoSample sample;
+    sample.inContact = ch.contact;
     sample.readOk = ch.servoOk;
     sample.torqueOn = st.torqueOn;
     sample.position = st.position;
@@ -308,7 +324,7 @@ void TeleopController::readServos(uint32_t nowMs) {
     sample.temperatureC = st.temperatureC;
     sample.errorByte = st.errorByte;
     sample.status = st.status;
-    const Fault fault = ch.supervisor.update(sample, ch.armed(), ch.goal, ch.reference, nowMs);
+    const Fault fault = ch.supervisor.update(sample, ch.armed(), ch.sentGoal, ch.reference, nowMs);
 
     if (fault != Fault::None && !ch.armed()) {
       // Torque on while the firmware has the joint off: switch it off again.
@@ -357,7 +373,14 @@ void TeleopController::readServos(uint32_t nowMs) {
     return;
   }
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
-    if (jointFaults[i] != Fault::None) disarmJoint(i, jointFaults[i], teleop::faultToString(jointFaults[i]));
+    if (jointFaults[i] == Fault::None) continue;
+    char reason[96];
+    if (jointFaults[i] == Fault::ServoError) {
+      describeServoError(channels_[i].servo, reason, sizeof(reason));
+    } else {
+      strlcpy(reason, teleop::faultToString(jointFaults[i]), sizeof(reason));
+    }
+    disarmJoint(i, jointFaults[i], reason);
   }
 }
 
@@ -371,8 +394,9 @@ void TeleopController::stepJoint(uint8_t index, float dt, uint32_t nowMs) {
       if (ch.readThisCycle && ch.servoOk) {
         ch.limiter.reset(ch.servo.position);
         ch.model.reset(ch.servo.position);
-        ch.goal = ch.reference = ch.servo.position;
+        ch.goal = ch.sentGoal = ch.reference = ch.servo.position;
       }
+      ch.contact = false;
       return;
 
     case JointState::Align:
@@ -424,8 +448,11 @@ void TeleopController::stepJoint(uint8_t index, float dt, uint32_t nowMs) {
       break;
   }
 
-  // Capability model for the tracking check: chases the goal at vsat.
-  ch.model.setTarget(ch.goal);
+  // Grip limiter: the servo never gets a goal further than the current lead
+  // from where it was last measured (bounds the squeeze on an object).
+  ch.sentGoal = ch.grip.clamp(ch.goal, ch.servo.position);
+  // Capability model for the tracking check: chases the sent goal at vsat.
+  ch.model.setTarget(ch.sentGoal);
   ch.reference = ch.model.step(dt);
 }
 
@@ -441,7 +468,7 @@ void TeleopController::writeGoals(uint32_t nowMs) {
     if (!ch.armed() || !ch.servo.torqueOn || nowMs - ch.lastGoodReadMs > config::kServoStaleMs) continue;
     ch.speedRegister = streamSpeed(ch.limiter.velocity());
     ids[n] = ch.def->servoId;
-    positions[n] = static_cast<int16_t>(lroundf(ch.goal));
+    positions[n] = static_cast<int16_t>(lroundf(ch.sentGoal));
     speeds[n] = ch.speedRegister;
     ch.goalSent = true;
     ++n;
@@ -537,13 +564,14 @@ void TeleopController::handleSet(const Command& c) {
     applyRuntimeParams(ch);
   }
   if (teleop::isGlobalKey(c.key)) {
-    message("global: lead %.0f ms, mincut %.3f Hz, beta %.4f, jump %.0f deg", global_.leadMs,
-            global_.minCutoffHz, global_.beta, global_.jumpDeg);
+    message("global: lead %.0f ms, mincut %.3f Hz, beta %.4f, jump %.0f deg, gripload %.0f %%, loadtrip %s",
+            global_.leadMs, global_.minCutoffHz, global_.beta, global_.jumpDeg, global_.gripLoadPct,
+            global_.loadTripEnabled ? "on" : "off");
   } else if (JointChannel* ch = channelForServo(c.joint)) {
     const teleop::JointSettings& s = ch->settings;
-    message("joint %u: %s enc %d exo %d servo %d..%d vmax %u amax %u vsat %u trk %u", c.joint,
+    message("joint %u: %s enc %d exo %d servo %d..%d vmax %u amax %u vsat %u trk %u grip %u", c.joint,
             s.enabled ? "on" : "off", s.encoderIndex == teleop::kNoEncoder ? -1 : s.encoderIndex,
-            s.exoB, s.servoA, s.servoB, s.vmax, s.amax, s.vsat, s.trackSteps);
+            s.exoB, s.servoA, s.servoB, s.vmax, s.amax, s.vsat, s.trackSteps, s.gripSteps);
   }
 }
 
@@ -783,8 +811,10 @@ const char* TeleopController::armJoint(uint8_t index, const ServoState& st, uint
   ch.limiter.reset(hold);
   ch.limiter.setLimits(config::kArmSpeed, ch.settings.amax);
   ch.model.reset(hold);
-  ch.goal = ch.reference = hold;
+  ch.goal = ch.sentGoal = ch.reference = hold;
   ch.supervisor.reset();
+  ch.grip.reset();
+  ch.contact = false;
   return nullptr;
 }
 
@@ -946,6 +976,9 @@ void TeleopController::publish() {
     j.exoFilteredCounts = ch.exoFiltered;
     j.target = ch.target;
     j.goal = ch.goal;
+    j.sentGoal = ch.sentGoal;
+    j.gripLead = ch.grip.lead();
+    j.contact = ch.contact;
     j.reference = ch.reference;
     j.speedRegister = ch.speedRegister;
     j.goalSent = ch.goalSent;

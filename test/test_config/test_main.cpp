@@ -82,9 +82,12 @@ void configureSample(JointSettings* joints, GlobalSettings& g) {
   joints[1].servoB = 880;
   joints[1].vmax = 500;
   joints[1].trackSteps = 60;
+  joints[1].gripSteps = 80;
   g.leadMs = 80.0f;
   g.beta = 0.025f;
   g.jumpDeg = 30.0f;
+  g.gripLoadPct = 70.0f;
+  g.loadTripEnabled = true;
 }
 
 void assertJointsEqual(const JointSettings& a, const JointSettings& b) {
@@ -98,6 +101,7 @@ void assertJointsEqual(const JointSettings& a, const JointSettings& b) {
   TEST_ASSERT_EQUAL(a.amax, b.amax);
   TEST_ASSERT_EQUAL(a.vsat, b.vsat);
   TEST_ASSERT_EQUAL(a.trackSteps, b.trackSteps);
+  TEST_ASSERT_EQUAL(a.gripSteps, b.gripSteps);
 }
 
 }  // namespace
@@ -169,7 +173,7 @@ void test_blob_round_trip() {
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
   TEST_ASSERT_EQUAL(kBlobSize, packConfig(joints, kMaxJoints, g, ServoBackend::Scs, blob, sizeof(blob)));
-  TEST_ASSERT_EQUAL(190, kBlobSize);
+  TEST_ASSERT_EQUAL(213, kBlobSize);
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
@@ -179,6 +183,8 @@ void test_blob_round_trip() {
   TEST_ASSERT_EQUAL_FLOAT(80.0f, lg.leadMs);
   TEST_ASSERT_EQUAL_FLOAT(0.025f, lg.beta);
   TEST_ASSERT_EQUAL_FLOAT(30.0f, lg.jumpDeg);
+  TEST_ASSERT_EQUAL_FLOAT(70.0f, lg.gripLoadPct);
+  TEST_ASSERT_TRUE(lg.loadTripEnabled);
 }
 
 void test_blob_rejects_corruption_without_touching_output() {
@@ -248,7 +254,7 @@ void test_blob_v1_migrates_and_keeps_calibration() {
   JointSettings joints[kMaxJoints];
   GlobalSettings g;
   configureSample(joints, g);
-  uint8_t blob[blobSizeFor(kV1JointCount)];
+  uint8_t blob[kV1BlobSize];
   TEST_ASSERT_EQUAL(172, packV1(joints, g, static_cast<uint8_t>(ServoBackend::Scs), blob));
 
   JointSettings out[kMaxJoints];
@@ -256,7 +262,13 @@ void test_blob_v1_migrates_and_keeps_calibration() {
   TEST_ASSERT_EQUAL(BlobStatus::Migrated, unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults,
                                                        kMaxJoints, kEncoders, GlobalSettings(), out, og));
   TEST_ASSERT_TRUE(blobApplied(BlobStatus::Migrated));
-  for (uint8_t i = 0; i < kV1JointCount; ++i) assertJointsEqual(joints[i], out[i]);
+  for (uint8_t i = 0; i < kV1JointCount; ++i) {
+    JointSettings expected = joints[i];
+    expected.gripSteps = defaultSettings(kDefaults[i]).gripSteps;  // not stored by version 1
+    assertJointsEqual(expected, out[i]);
+  }
+  TEST_ASSERT_EQUAL_FLOAT(GlobalSettings().gripLoadPct, og.gripLoadPct);
+  TEST_ASSERT_FALSE(og.loadTripEnabled);
   assertJointsEqual(defaultSettings(kDefaults[8]), out[8]);
   TEST_ASSERT_EQUAL_FLOAT(80.0f, og.leadMs);
 }
@@ -330,6 +342,31 @@ void test_parse_basic_commands() {
   TEST_ASSERT_NULL(parseCommand("cal 1 a", c));
   TEST_ASSERT_EQUAL(Verb::Cal, c.verb);
   TEST_ASSERT_FALSE(c.flag);
+}
+
+void test_parse_grip_commands() {
+  ParsedCommand c;
+  TEST_ASSERT_NULL(parseCommand("set 2 grip 0", c));
+  TEST_ASSERT_EQUAL(SetKey::Grip, c.key);
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, c.values[0]);
+  TEST_ASSERT_NULL(parseCommand("set gripload 70", c));
+  TEST_ASSERT_EQUAL(SetKey::GripLoad, c.key);
+  TEST_ASSERT_TRUE(isGlobalKey(c.key));
+  TEST_ASSERT_NULL(parseCommand("set loadtrip on", c));
+  TEST_ASSERT_EQUAL(SetKey::LoadTrip, c.key);
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, c.values[0]);
+  TEST_ASSERT_NOT_NULL(parseCommand("set loadtrip maybe", c));
+
+  JointSettings joints[kMaxJoints];
+  loadDefaults(joints);
+  GlobalSettings g;
+  parseCommand("set loadtrip on", c);
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_TRUE(g.loadTripEnabled);
+  parseCommand("set gripload 99", c);  // above the servo's own 80 % protection margin
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 1 grip 500", c);
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
 }
 
 void test_parse_limits_commands() {
@@ -437,6 +474,8 @@ void test_dump_round_trip() {
   TEST_ASSERT_EQUAL_FLOAT(g.leadMs, rg.leadMs);
   TEST_ASSERT_EQUAL_FLOAT(g.beta, rg.beta);
   TEST_ASSERT_EQUAL_FLOAT(g.jumpDeg, rg.jumpDeg);
+  TEST_ASSERT_EQUAL_FLOAT(g.gripLoadPct, rg.gripLoadPct);
+  TEST_ASSERT_EQUAL(g.loadTripEnabled, rg.loadTripEnabled);
 }
 
 void test_dump_reports_short_buffer() {
@@ -463,6 +502,7 @@ int main() {
   RUN_TEST(test_parse_basic_commands);
   RUN_TEST(test_parse_set_commands);
   RUN_TEST(test_parse_limits_commands);
+  RUN_TEST(test_parse_grip_commands);
   RUN_TEST(test_parse_errors);
   RUN_TEST(test_requires_disarmed);
   RUN_TEST(test_apply_validates_and_is_atomic);

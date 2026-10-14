@@ -86,16 +86,32 @@ struct KeyName {
   SetKey key;
 };
 
-constexpr KeyName kGlobalKeys[] = {
-    {"lead", SetKey::Lead}, {"mincut", SetKey::MinCutoff}, {"beta", SetKey::Beta}, {"jump", SetKey::Jump}};
-constexpr KeyName kJointNumberKeys[] = {
-    {"vmax", SetKey::VMax}, {"amax", SetKey::AMax}, {"vsat", SetKey::VSat}, {"trk", SetKey::Track}};
+constexpr KeyName kGlobalKeys[] = {{"lead", SetKey::Lead},
+                                    {"mincut", SetKey::MinCutoff},
+                                    {"beta", SetKey::Beta},
+                                    {"jump", SetKey::Jump},
+                                    {"gripload", SetKey::GripLoad}};
+constexpr KeyName kJointNumberKeys[] = {{"vmax", SetKey::VMax},
+                                        {"amax", SetKey::AMax},
+                                        {"vsat", SetKey::VSat},
+                                        {"trk", SetKey::Track},
+                                        {"grip", SetKey::Grip}};
 
 const char* parseSet(const Tokens& tk, ParsedCommand& out) {
   out.verb = Verb::Set;
+  if (eq(tk.t[1], "loadtrip")) {
+    bool on = false;
+    if (tk.n != 3 || !parseOnOff(tk.t[2], on)) return "usage: set loadtrip on|off";
+    out.key = SetKey::LoadTrip;
+    out.values[0] = on ? 1.0f : 0.0f;
+    out.valueCount = 1;
+    return nullptr;
+  }
   for (const KeyName& k : kGlobalKeys) {
     if (!eq(tk.t[1], k.name)) continue;
-    if (tk.n != 3 || !parseFloat(tk.t[2], out.values[0])) return "usage: set <lead|mincut|beta|jump> <value>";
+    if (tk.n != 3 || !parseFloat(tk.t[2], out.values[0])) {
+      return "usage: set <lead|mincut|beta|jump|gripload> <value>";
+    }
     out.key = k.key;
     out.valueCount = 1;
     return nullptr;
@@ -139,13 +155,15 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
   for (const KeyName& k : kJointNumberKeys) {
     if (!eq(key, k.name)) continue;
     long v = 0;
-    if (tk.n != 4 || !parseInt(tk.t[3], 0, 65535, v)) return "usage: set <joint> <vmax|amax|vsat|trk> <integer>";
+    if (tk.n != 4 || !parseInt(tk.t[3], 0, 65535, v)) {
+      return "usage: set <joint> <vmax|amax|vsat|trk|grip> <integer>";
+    }
     out.key = k.key;
     out.values[0] = static_cast<float>(v);
     out.valueCount = 1;
     return nullptr;
   }
-  return "unknown key (on off enc exo servo vmax amax vsat trk | lead mincut beta jump)";
+  return "unknown key (on off enc exo servo vmax amax vsat trk grip | lead mincut beta jump gripload loadtrip)";
 }
 
 struct Simple {
@@ -286,7 +304,8 @@ const char* parseCommand(const char* line, ParsedCommand& out) {
 }
 
 bool isGlobalKey(SetKey key) {
-  return key == SetKey::Lead || key == SetKey::MinCutoff || key == SetKey::Beta || key == SetKey::Jump;
+  return key == SetKey::Lead || key == SetKey::MinCutoff || key == SetKey::Beta || key == SetKey::Jump ||
+         key == SetKey::GripLoad || key == SetKey::LoadTrip;
 }
 
 bool requiresDisarmed(const ParsedCommand& c) {
@@ -327,6 +346,8 @@ const char* applySetting(const ParsedCommand& c, JointSettings* joints, const Jo
       case SetKey::MinCutoff: g.minCutoffHz = c.values[0]; break;
       case SetKey::Beta: g.beta = c.values[0]; break;
       case SetKey::Jump: g.jumpDeg = c.values[0]; break;
+      case SetKey::GripLoad: g.gripLoadPct = c.values[0]; break;
+      case SetKey::LoadTrip: g.loadTripEnabled = c.values[0] != 0.0f; break;
       default: break;
     }
     const char* error = validateGlobal(g);
@@ -354,6 +375,7 @@ const char* applySetting(const ParsedCommand& c, JointSettings* joints, const Jo
     case SetKey::AMax: s.amax = static_cast<uint16_t>(v0); break;
     case SetKey::VSat: s.vsat = static_cast<uint16_t>(v0); break;
     case SetKey::Track: s.trackSteps = static_cast<uint16_t>(v0); break;
+    case SetKey::Grip: s.gripSteps = static_cast<uint16_t>(v0); break;
     default: return "unknown key";
   }
   const char* error = validateJoint(s, defaults[index], encoderCount);
@@ -376,12 +398,13 @@ size_t formatDump(const JointSettings* joints, const JointDefaults* defaults, ui
     }
     if (exoCalibrated(s)) a.add("set %u exo %u %u\n", d.servoId, s.exoRef, exoRawB(s));
     if (servoCalibrated(s, d)) a.add("set %u servo %d %d\n", d.servoId, s.servoA, s.servoB);
-    a.add("set %u vmax %u\nset %u amax %u\nset %u vsat %u\nset %u trk %u\n", d.servoId, s.vmax,
-          d.servoId, s.amax, d.servoId, s.vsat, d.servoId, s.trackSteps);
+    a.add("set %u vmax %u\nset %u amax %u\nset %u vsat %u\nset %u trk %u\nset %u grip %u\n", d.servoId,
+          s.vmax, d.servoId, s.amax, d.servoId, s.vsat, d.servoId, s.trackSteps, d.servoId, s.gripSteps);
     a.add("set %u %s\n", d.servoId, s.enabled ? "on" : "off");
   }
-  a.add("set lead %g\nset mincut %g\nset beta %g\nset jump %g\n", global.leadMs, global.minCutoffHz,
-        global.beta, global.jumpDeg);
+  a.add("set lead %g\nset mincut %g\nset beta %g\nset jump %g\nset gripload %g\nset loadtrip %s\n",
+        global.leadMs, global.minCutoffHz, global.beta, global.jumpDeg, global.gripLoadPct,
+        global.loadTripEnabled ? "on" : "off");
   a.add("# end of dump: run `save` to store it\n");
   return a.result();
 }

@@ -1,3 +1,4 @@
+#include <grip_limiter.h>
 #include <joint_map.h>
 #include <jump_guard.h>
 #include <math.h>
@@ -246,6 +247,90 @@ void test_fault_scope() {
   TEST_ASSERT_EQUAL(FaultScope::Joint, faultScope(Fault::TrackingError));
 }
 
+void test_supervisor_load_trips_can_be_disabled() {
+  JointSupervisor sup;
+  SupervisorConfig c;
+  c.loadTripEnabled = false;
+  sup.setConfig(c);
+  ServoSample s = healthy(true);
+  s.loadPct = 95.0f;
+  for (uint32_t t = 0; t <= 2000; t += 10) {
+    TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 500.0f, t));
+  }
+  s.errorByte = 0x20;  // the servo's own overload protection still ends it, per joint
+  const Fault f = sup.update(s, true, 500.0f, 500.0f, 2010);
+  TEST_ASSERT_EQUAL(Fault::ServoError, f);
+  TEST_ASSERT_EQUAL(FaultScope::Joint, faultScope(f));
+}
+
+void test_supervisor_contact_suspends_tracking() {
+  JointSupervisor sup;
+  ServoSample s = healthy(true);
+  s.position = 500;  // blocked by an object, far behind goal and model
+  s.inContact = true;
+  for (uint32_t t = 0; t <= 1000; t += 10) {
+    TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 700.0f, 650.0f, t));
+  }
+  s.inContact = false;
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 700.0f, 650.0f, 1010));
+  TEST_ASSERT_EQUAL(Fault::TrackingError, sup.update(s, true, 700.0f, 650.0f, 1410));
+}
+
+// ---- grip limiter ------------------------------------------------------------
+
+GripLimiter makeGrip() {
+  GripLimiter g;
+  GripLimiter::Config c;
+  c.maxLead = 60.0f;
+  c.loadPct = 60.0f;
+  g.setConfig(c);
+  g.reset();
+  return g;
+}
+
+void test_grip_free_motion_keeps_full_lead() {
+  GripLimiter g = makeGrip();
+  for (int i = 0; i < 50; ++i) TEST_ASSERT_FALSE(g.update(30.0f, 400.0f));  // moving, light load
+  TEST_ASSERT_EQUAL_FLOAT(60.0f, g.lead());
+  TEST_ASSERT_EQUAL_FLOAT(540.0f, g.clamp(540.0f, 500.0f));  // goal within lead: untouched
+}
+
+void test_grip_fast_but_loaded_is_not_contact() {
+  GripLimiter g = makeGrip();
+  TEST_ASSERT_FALSE(g.update(70.0f, 300.0f));  // acceleration load while moving
+  TEST_ASSERT_EQUAL_FLOAT(60.0f, g.lead());
+}
+
+void test_grip_contact_shrinks_lead_and_clamps_goal() {
+  GripLimiter g = makeGrip();
+  for (int i = 0; i < 5; ++i) TEST_ASSERT_TRUE(g.update(-75.0f, 0.0f));  // sign does not matter
+  TEST_ASSERT_EQUAL_FLOAT(50.0f, g.lead());
+  TEST_ASSERT_EQUAL_FLOAT(550.0f, g.clamp(800.0f, 500.0f));
+  TEST_ASSERT_EQUAL_FLOAT(450.0f, g.clamp(200.0f, 500.0f));
+  for (int i = 0; i < 100; ++i) g.update(75.0f, 0.0f);
+  TEST_ASSERT_EQUAL_FLOAT(3.0f, g.lead());  // floor keeps a minimal squeeze
+}
+
+void test_grip_holds_in_hysteresis_band_and_recovers() {
+  GripLimiter g = makeGrip();
+  for (int i = 0; i < 10; ++i) g.update(75.0f, 0.0f);
+  const float held = g.lead();
+  g.update(55.0f, 0.0f);  // between 50 and 60: neither shrink nor grow
+  TEST_ASSERT_EQUAL_FLOAT(held, g.lead());
+  for (int i = 0; i < 20; ++i) g.update(10.0f, 200.0f);  // object released
+  TEST_ASSERT_EQUAL_FLOAT(60.0f, g.lead());
+}
+
+void test_grip_disabled_passes_goal_through() {
+  GripLimiter g;
+  GripLimiter::Config c;
+  c.maxLead = 0.0f;
+  g.setConfig(c);
+  g.reset();
+  TEST_ASSERT_FALSE(g.update(90.0f, 0.0f));
+  TEST_ASSERT_EQUAL_FLOAT(900.0f, g.clamp(900.0f, 500.0f));
+}
+
 // ---- jump guard --------------------------------------------------------------
 
 void test_jump_guard_rejects_single_glitch() {
@@ -308,6 +393,13 @@ int main() {
   RUN_TEST(test_supervisor_lag_behind_model_trips);
   RUN_TEST(test_supervisor_voltage_bit_is_its_own_fault);
   RUN_TEST(test_fault_scope);
+  RUN_TEST(test_supervisor_load_trips_can_be_disabled);
+  RUN_TEST(test_supervisor_contact_suspends_tracking);
+  RUN_TEST(test_grip_free_motion_keeps_full_lead);
+  RUN_TEST(test_grip_fast_but_loaded_is_not_contact);
+  RUN_TEST(test_grip_contact_shrinks_lead_and_clamps_goal);
+  RUN_TEST(test_grip_holds_in_hysteresis_band_and_recovers);
+  RUN_TEST(test_grip_disabled_passes_goal_through);
   RUN_TEST(test_jump_guard_rejects_single_glitch);
   RUN_TEST(test_jump_guard_resyncs_after_persistent_jump);
   RUN_TEST(test_jump_guard_reset_accepts_anything);
