@@ -45,6 +45,7 @@ const char* jointStateToString(JointState state) {
     case JointState::Align: return "ALIGN";
     case JointState::Follow: return "FOLLOW";
     case JointState::Hold: return "HOLD";
+    case JointState::Sweep: return "SWEEP";
   }
   return "?";
 }
@@ -291,10 +292,15 @@ void TeleopController::readServos(uint32_t nowMs) {
   }
 
   // Round-robin over enabled (or armed) joints, at most kServoReadsPerCycle per cycle.
+  // A sweep reads only its joint, every cycle, for timing resolution.
   uint8_t candidates[teleop::kMaxJoints];
   uint8_t n = 0;
-  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
-    if (channels_[i].settings.enabled || channels_[i].armed()) candidates[n++] = i;
+  if (sweepJoint_ >= 0) {
+    candidates[n++] = static_cast<uint8_t>(sweepJoint_);
+  } else {
+    for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+      if (channels_[i].settings.enabled || channels_[i].armed()) candidates[n++] = i;
+    }
   }
   const uint8_t reads = n < config::kServoReadsPerCycle ? n : config::kServoReadsPerCycle;
 
@@ -315,7 +321,9 @@ void TeleopController::readServos(uint32_t nowMs) {
       ch.contact = ch.armed() && ch.grip.update(st.loadPct, st.speed);
     }
     teleop::ServoSample sample;
-    sample.inContact = ch.contact;
+    // Contact and sweeps both make lagging behind the goal expected, so the
+    // tracking check is suspended (a sweep drives the joint at full speed).
+    sample.inContact = ch.contact || ch.state == JointState::Sweep;
     sample.readOk = ch.servoOk;
     sample.torqueOn = st.torqueOn;
     sample.position = st.position;
@@ -399,6 +407,10 @@ void TeleopController::stepJoint(uint8_t index, float dt, uint32_t nowMs) {
       ch.contact = false;
       return;
 
+    case JointState::Sweep:
+      stepSweep(index, nowMs);
+      return;
+
     case JointState::Align:
       if (encFault) {
         disarmJoint(index, Fault::None, "encoder lost during ALIGN");
@@ -466,6 +478,7 @@ void TeleopController::writeGoals(uint32_t nowMs) {
     // Only to armed joints whose torque a recent read showed on: a goal write
     // to a disarmed SCS0009 would switch its torque on by itself.
     if (!ch.armed() || !ch.servo.torqueOn || nowMs - ch.lastGoodReadMs > config::kServoStaleMs) continue;
+    if (ch.state == JointState::Sweep) continue;  // the sweep writes its own single goals
     ch.speedRegister = streamSpeed(ch.limiter.velocity());
     ids[n] = ch.def->servoId;
     positions[n] = static_cast<int16_t>(lroundf(ch.sentGoal));
@@ -488,6 +501,10 @@ uint16_t TeleopController::streamSpeed(float velocity) const {
 void TeleopController::handleCommand(const Command& c) {
   if (armedCount() > 0 && teleop::requiresDisarmed(c)) {
     message("refused while joints are armed: disarm first");
+    return;
+  }
+  if (sweepJoint_ >= 0 && c.verb == Verb::Arm) {
+    message("refused while a sweep is running (`disarm` or `x` stops it)");
     return;
   }
   switch (c.verb) {
@@ -535,6 +552,8 @@ void TeleopController::handleCommand(const Command& c) {
     case Verb::Defaults: loadDefaults(); break;
     case Verb::LimitsCheck: handleLimitsCheck(); break;
     case Verb::LimitsWrite: handleLimitsWrite(c.joint); break;
+    case Verb::Sweep: handleSweep(c.joint); break;
+    case Verb::SweepApply: handleSweepApply(c.joint); break;
     default: break;  // console-only verbs never reach the controller
   }
 }
@@ -689,6 +708,154 @@ void TeleopController::handleLimitsWrite(uint8_t servoId) {
             ok ? "written and verified" : "FAILED (torque must be off; check the bus)");
   }
   if (servoId != 0 && channelForServo(servoId) == nullptr) message("no joint with servo id %u", servoId);
+}
+
+// ---- speed sweep --------------------------------------------------------------
+
+void TeleopController::handleSweep(uint8_t servoId) {
+  const int index = teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
+  if (index < 0) {
+    message("no joint with servo id %u", servoId);
+    return;
+  }
+  JointChannel& ch = channels_[index];
+  const teleop::JointDefaults& d = *ch.def;
+  if (!teleop::travelDefined(d)) {
+    message("sweep refused: joint %u travel not defined in config.h", servoId);
+    return;
+  }
+  // Calibrated servo endpoints are the range the operator has checked by hand;
+  // otherwise the configured travel. 10 steps of margin on each side.
+  int16_t lo = d.travelMin, hi = d.travelMax;
+  if (teleop::servoCalibrated(ch.settings, d)) {
+    lo = min(ch.settings.servoA, ch.settings.servoB);
+    hi = max(ch.settings.servoA, ch.settings.servoB);
+  }
+  lo += 10;
+  hi -= 10;
+  if (hi - lo < 60) {
+    message("sweep refused: joint %u range %d..%d is too short to time", servoId, lo, hi);
+    return;
+  }
+  ServoState st;
+  if (!bus_.readState(servoId, st)) {
+    message("sweep refused: no reply from servo %u", servoId);
+    return;
+  }
+  if (st.errorByte != 0 || st.status != 0 || st.position < d.travelMin || st.position > d.travelMax) {
+    message("sweep refused: servo %u error 0x%02X or position %d outside travel", servoId, st.errorByte,
+            st.position);
+    return;
+  }
+
+  monitor_ = false;
+  const uint32_t nowMs = millis();
+  const char* problem = armJoint(index, st, nowMs);
+  if (problem != nullptr) {
+    disarmJoint(index, Fault::None, problem);
+    return;
+  }
+  ch.state = JointState::Sweep;
+  teleop::SweepConfig cfg;
+  cfg.lo = lo;
+  cfg.hi = hi;
+  sweep_.start(cfg, st.position, nowMs);
+  sweepJoint_ = static_cast<int8_t>(index);
+  message("sweep j%u (%s): range %d..%d, registers 100/300/600/1000, both directions; `x`, `disarm` or BOOT aborts",
+          servoId, d.name, lo, hi);
+}
+
+void TeleopController::stepSweep(uint8_t index, uint32_t nowMs) {
+  JointChannel& ch = channels_[index];
+  const bool valid = ch.readThisCycle && ch.servoOk;
+  const teleop::SweepStep step = sweep_.update(nowMs, ch.servo.position, ch.servo.loadPct, valid);
+  if (step.write) {
+    bus_.writeGoal(ch.def->servoId, step.goal, step.speed);
+    ch.goal = ch.sentGoal = ch.reference = step.goal;
+  }
+  if (step.runFinished) {
+    const teleop::SweepResult& r = sweep_.result();
+    const teleop::SweepRun& run = r.runs[r.runCount - 1];
+    if (!run.valid) {
+      message("sweep j%u reg %4u %c: skipped (previous move did not get back far enough)",
+              ch.def->servoId, run.speedRegister, run.direction > 0 ? '+' : '-');
+    } else {
+      message("sweep j%u reg %4u %c: %4.0f steps/s %s, max load %.0f %%", ch.def->servoId,
+              run.speedRegister, run.direction > 0 ? '+' : '-', run.speed,
+              run.reached ? "arrived  " : "TIMED OUT", run.maxLoadPct);
+    }
+  }
+  if (step.done) {
+    endSweep(nullptr);
+    disarmJoint(index, Fault::None, "sweep finished");
+  }
+}
+
+void TeleopController::endSweep(const char* abortReason) {
+  if (sweepJoint_ < 0) return;
+  const uint8_t index = static_cast<uint8_t>(sweepJoint_);
+  sweepJoint_ = -1;  // before anything that could disarm and re-enter
+  if (sweep_.active()) sweep_.abort(abortReason != nullptr ? abortReason : "stopped");
+  lastSweep_[index] = sweep_.result();
+  haveSweep_[index] = true;
+  reportSweep(index);
+}
+
+void TeleopController::reportSweep(uint8_t index) {
+  const teleop::SweepResult& r = lastSweep_[index];
+  const JointChannel& ch = channels_[index];
+  const uint8_t id = ch.def->servoId;
+  if (r.aborted) {
+    message("sweep j%u aborted: %s (%u move(s) recorded, no suggestion)", id, r.abortReason, r.runCount);
+    return;
+  }
+  char plus[24], minus[24];
+  if (r.limitedPlus) {
+    strlcpy(plus, "FORCE-LIMITED", sizeof(plus));
+  } else {
+    snprintf(plus, sizeof(plus), "%.0f steps/s", r.saturationPlus);
+  }
+  if (r.limitedMinus) {
+    strlcpy(minus, "FORCE-LIMITED", sizeof(minus));
+  } else {
+    snprintf(minus, sizeof(minus), "%.0f steps/s", r.saturationMinus);
+  }
+  message("sweep j%u done: saturation + %s, - %s", id, plus, minus);
+  if (r.applicable()) {
+    message("sweep j%u suggests vmax %u vsat %u (now %u / %u): `sweep %u apply`, then `save`", id,
+            r.suggestedVmax, r.suggestedVsat, ch.settings.vmax, ch.settings.vsat, id);
+  } else {
+    message("sweep j%u: no suggestion; a direction never arrived at register >= 300 "
+            "(friction / tendon preload: fix the mechanics, then sweep again)", id);
+  }
+}
+
+void TeleopController::handleSweepApply(uint8_t servoId) {
+  const int index = teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
+  if (index < 0) {
+    message("no joint with servo id %u", servoId);
+    return;
+  }
+  if (!haveSweep_[index]) {
+    message("joint %u has no sweep result yet: run `sweep %u` first", servoId, servoId);
+    return;
+  }
+  const teleop::SweepResult& r = lastSweep_[index];
+  if (!r.applicable()) {
+    message("apply refused: the last sweep of joint %u was %s", servoId,
+            r.aborted ? "aborted" : "force-limited");
+    return;
+  }
+  Command c;
+  c.verb = Verb::Set;
+  c.joint = servoId;
+  c.valueCount = 1;
+  c.key = teleop::SetKey::VMax;
+  c.values[0] = r.suggestedVmax;
+  handleSet(c);
+  c.key = teleop::SetKey::VSat;
+  c.values[0] = r.suggestedVsat;
+  handleSet(c);
 }
 
 void TeleopController::saveConfig() {
@@ -888,6 +1055,7 @@ bool TeleopController::switchOff(const uint8_t* ids, uint8_t count) {
 }
 
 void TeleopController::disarmJoint(uint8_t index, Fault fault, const char* reason) {
+  if (sweepJoint_ == static_cast<int8_t>(index)) endSweep(reason);
   JointChannel& ch = channels_[index];
   ch.state = JointState::Off;  // first, so no goal can follow
   const uint8_t id = ch.def->servoId;
@@ -899,6 +1067,7 @@ void TeleopController::disarmJoint(uint8_t index, Fault fault, const char* reaso
 }
 
 void TeleopController::disarmAll(Fault fault, int jointIndex, const char* reason) {
+  endSweep(reason);
   uint8_t ids[teleop::kMaxJoints];
   uint8_t n = 0;
   for (JointChannel& ch : channels_) {
@@ -919,6 +1088,7 @@ void TeleopController::disarmAll(Fault fault, int jointIndex, const char* reason
 }
 
 void TeleopController::torqueOffAll(const char* reason) {
+  endSweep(reason);
   for (JointChannel& ch : channels_) ch.state = JointState::Off;
   uint8_t ids[teleop::kMaxJoints];
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) ids[i] = config::kJoints[i].servoId;

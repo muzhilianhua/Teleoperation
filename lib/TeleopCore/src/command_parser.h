@@ -39,6 +39,8 @@ enum class Verb : uint8_t {
   Dump,
   LimitsCheck,
   LimitsWrite,  // joint 0 = all joints
+  Sweep,        // joint
+  SweepApply,   // joint
 };
 
 enum class SetKey : uint8_t {

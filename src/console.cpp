@@ -118,6 +118,7 @@ void Console::printHelp() {
       "  set loadtrip on|off                        firmware load trips (off: servo overload decides)\n"
       "  save | load | defaults | dump              NVS store / reload / reset (RAM) / export\n"
       "  limits check | limits write <j|all>        servo angle-limit registers vs travel (disarmed)\n"
+      "  sweep <j> | sweep <j> apply                measure saturation speed, suggest vmax/vsat (disarmed)\n"
       "  plot <j> on | plot off                     Teleplot traces at 50 Hz");
 }
 

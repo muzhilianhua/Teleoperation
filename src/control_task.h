@@ -20,11 +20,13 @@
 #include <one_euro.h>
 #include <rate_limiter.h>
 #include <servo_bus.h>
+#include <speed_sweep.h>
 #include <supervisor.h>
 
 #include "config.h"
 
-enum class JointState : uint8_t { Off, Align, Follow, Hold };
+// Sweep: the joint is armed alone and driven by the speed sweep, not the glove.
+enum class JointState : uint8_t { Off, Align, Follow, Hold, Sweep };
 const char* jointStateToString(JointState state);
 
 using Command = teleop::ParsedCommand;
@@ -177,6 +179,11 @@ class TeleopController {
   void handleCalHand(const Command& command);
   void handleLimitsCheck();
   void handleLimitsWrite(uint8_t servoId);
+  void handleSweep(uint8_t servoId);
+  void handleSweepApply(uint8_t servoId);
+  void stepSweep(uint8_t index, uint32_t nowMs);
+  void endSweep(const char* abortReason);
+  void reportSweep(uint8_t index);
   void saveConfig();
   bool loadConfig(bool atBoot);
   void loadDefaults();
@@ -215,6 +222,11 @@ class TeleopController {
   JointChannel channels_[teleop::kMaxJoints];
   teleop::GlobalSettings global_;
   teleop::SupplySupervisor supplySupervisor_;
+
+  teleop::SpeedSweep sweep_;
+  int8_t sweepJoint_ = -1;  // channel index while a sweep runs
+  teleop::SweepResult lastSweep_[teleop::kMaxJoints];
+  bool haveSweep_[teleop::kMaxJoints] = {false};
 
   bool monitor_ = false;
   uint8_t monitorIndex_ = 0;
