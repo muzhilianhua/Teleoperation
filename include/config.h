@@ -65,13 +65,13 @@ inline constexpr teleop::JointDefaults kJoints[teleop::kMaxJoints] = {
     // id  name             min  max  vmax vsat amax           encoder            enabled
     {1, "triple_pip",      350, 730, 660, 245, kAcceleration, 5,                 true},
     {2, "triple_dip",      600, 890, 660, 370, kAcceleration, teleop::kNoEncoder, false},
-    {3, "index_pip",       250, 600, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
+    {3, "index_pip",       230, 630, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
     {4, "index_dip",       250, 590, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
-    {5, "index_mcp",       435, 600, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
+    {5, "index_mcp",       420, 600, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
     {6, "thumb_mcp_rot",   300, 700, 690, 365, kAcceleration, teleop::kNoEncoder, false},
     {7, "thumb_mcp",       650, 900, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
     {8, "thumb_ip",         20, 280, 380, 230, kAcceleration, teleop::kNoEncoder, false},
-    {9, "joint9",            0,   0, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
+    {9, "joint9",          480, 950, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
 };
 constexpr teleop::ServoBackend kServoBackend = teleop::ServoBackend::Scs;
 
