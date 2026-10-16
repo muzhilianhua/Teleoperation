@@ -40,7 +40,8 @@ const char* validateJoint(const JointSettings& s, const JointDefaults& d, uint8_
   if (!travelDefined(d) && s.enabled) return "travel not defined in config.h: joint cannot be enabled";
   if (s.encoderIndex != kNoEncoder && s.encoderIndex >= encoderCount) return "encoder index out of range";
   if (s.exoRef >= kEncoderCounts) return "exo reference out of range";
-  if (s.exoB != 0 && abs(s.exoB) < kMinExoSpanCounts) return "exo span below 4 deg";
+  if (s.exoB != 0 && labs(s.exoB) < kMinExoSpanCounts) return "exo span below 4 deg";
+  if (labs(s.exoB) > kMaxExoSpanCounts) return "exo span above 3 encoder turns";
   if (s.servoA != s.servoB && !servoCalibrated(s, d)) return "servo endpoint outside travel";
   if (!inRange(s.vmax, 1, 1000)) return "vmax outside 1..1000";
   if (!inRange(s.vsat, 1, 1000)) return "vsat outside 1..1000";

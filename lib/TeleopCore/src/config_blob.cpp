@@ -38,6 +38,7 @@ class Reader {
     return static_cast<uint16_t>(lo | (u8() << 8));
   }
   int16_t i16() { return static_cast<int16_t>(u16()); }
+  int32_t i32() { return static_cast<int32_t>(u32()); }
   uint32_t u32() {
     const uint32_t lo = u16();
     return lo | (static_cast<uint32_t>(u16()) << 16);
@@ -63,7 +64,7 @@ const char* blobStatusToString(BlobStatus status) {
     case BlobStatus::BadVersion: return "unsupported version";
     case BlobStatus::BadCrc: return "CRC mismatch";
     case BlobStatus::BadJointCount: return "joint count mismatch";
-    case BlobStatus::Migrated: return "migrated from version 1: new joints and fields set to defaults";
+    case BlobStatus::Migrated: return "migrated from an older version: new joints and fields set to defaults";
     case BlobStatus::BackendMismatch: return "saved for another servo series: servo endpoints cleared";
     case BlobStatus::InvalidJoint: return "invalid joint settings reset to defaults";
     case BlobStatus::InvalidGlobal: return "invalid global settings reset to defaults";
@@ -99,7 +100,7 @@ size_t packConfig(const JointSettings* joints, uint8_t count, const GlobalSettin
     w.u8(s.enabled ? 1 : 0);
     w.u8(s.encoderIndex);
     w.u16(s.exoRef);
-    w.u16(static_cast<uint16_t>(s.exoB));
+    w.u32(static_cast<uint32_t>(s.exoB));
     w.u16(static_cast<uint16_t>(s.servoA));
     w.u16(static_cast<uint16_t>(s.servoB));
     w.u16(s.vmax);
@@ -132,6 +133,9 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, ServoBackend backend,
   if (version == kBlobVersion) {
     savedCount = kMaxJoints;
     expectedLength = kBlobSize;
+  } else if (version == 2) {
+    savedCount = kMaxJoints;
+    expectedLength = kV2BlobSize;
   } else if (version == 1) {
     savedCount = kV1JointCount;
     expectedLength = kV1BlobSize;
@@ -139,6 +143,7 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, ServoBackend backend,
     return BlobStatus::BadVersion;
   }
   const bool v1 = version == 1;
+  const bool wideSpan = version >= 3;  // exoB became 32-bit in version 3
   if (length != expectedLength) return BlobStatus::BadSize;
   Reader crcReader(in + length - 4);
   if (crcReader.u32() != crc32(in, length - 4)) return BlobStatus::BadCrc;
@@ -153,7 +158,7 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, ServoBackend backend,
     s.enabled = r.u8() != 0;
     s.encoderIndex = r.u8();
     s.exoRef = r.u16();
-    s.exoB = r.i16();
+    s.exoB = wideSpan ? r.i32() : r.i16();
     s.servoA = r.i16();
     s.servoB = r.i16();
     s.vmax = r.u16();
@@ -172,7 +177,7 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, ServoBackend backend,
     g.loadTripEnabled = r.u8() != 0;
   }
 
-  BlobStatus status = v1 ? BlobStatus::Migrated : BlobStatus::Ok;
+  BlobStatus status = version < kBlobVersion ? BlobStatus::Migrated : BlobStatus::Ok;
   if (savedBackend != static_cast<uint8_t>(backend)) {
     status = BlobStatus::BackendMismatch;
     for (uint8_t i = 0; i < count; ++i) loaded[i].servoA = loaded[i].servoB = defaults[i].travelMin;

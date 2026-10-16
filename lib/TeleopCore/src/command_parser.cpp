@@ -152,6 +152,18 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     out.valueCount = 2;
     return nullptr;
   }
+  if (eq(key, "exospan")) {
+    long a = 0, span = 0;
+    if (tk.n != 5 || !parseInt(tk.t[3], 0, kEncoderCounts - 1, a) ||
+        !parseInt(tk.t[4], -kMaxExoSpanCounts, kMaxExoSpanCounts, span)) {
+      return "usage: set <joint> exospan <rawA> <span counts>";
+    }
+    out.key = SetKey::ExoSpan;
+    out.values[0] = static_cast<float>(a);
+    out.values[1] = static_cast<float>(span);
+    out.valueCount = 2;
+    return nullptr;
+  }
   for (const KeyName& k : kJointNumberKeys) {
     if (!eq(key, k.name)) continue;
     long v = 0;
@@ -163,7 +175,7 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     out.valueCount = 1;
     return nullptr;
   }
-  return "unknown key (on off enc exo servo vmax amax vsat trk grip | lead mincut beta jump gripload loadtrip)";
+  return "unknown key (on off enc exo exospan servo vmax amax vsat trk grip | lead mincut beta jump gripload loadtrip)";
 }
 
 struct Simple {
@@ -333,6 +345,7 @@ bool requiresDisarmed(const ParsedCommand& c) {
       return c.flag;
     case Verb::Set:
       return c.key == SetKey::Enable || c.key == SetKey::Encoder || c.key == SetKey::Exo ||
+             c.key == SetKey::ExoSpan ||
              c.key == SetKey::Servo;
     default:
       return false;
@@ -377,6 +390,10 @@ const char* applySetting(const ParsedCommand& c, JointSettings* joints, const Jo
       s.exoRef = static_cast<uint16_t>(v0);
       s.exoB = static_cast<int16_t>(unwrapCounts(static_cast<uint16_t>(v1), static_cast<uint16_t>(v0)));
       break;
+    case SetKey::ExoSpan:
+      s.exoRef = static_cast<uint16_t>(v0);
+      s.exoB = static_cast<int32_t>(v1);
+      break;
     case SetKey::Servo:
       s.servoA = static_cast<int16_t>(v0);
       s.servoB = static_cast<int16_t>(v1);
@@ -406,7 +423,7 @@ size_t formatDump(const JointSettings* joints, const JointDefaults* defaults, ui
     } else {
       a.add("set %u enc %u\n", d.servoId, s.encoderIndex);
     }
-    if (exoCalibrated(s)) a.add("set %u exo %u %u\n", d.servoId, s.exoRef, exoRawB(s));
+    if (exoCalibrated(s)) a.add("set %u exospan %u %ld\n", d.servoId, s.exoRef, static_cast<long>(s.exoB));
     if (servoCalibrated(s, d)) a.add("set %u servo %d %d\n", d.servoId, s.servoA, s.servoB);
     a.add("set %u vmax %u\nset %u amax %u\nset %u vsat %u\nset %u trk %u\nset %u grip %u\n", d.servoId,
           s.vmax, d.servoId, s.amax, d.servoId, s.vsat, d.servoId, s.trackSteps, d.servoId, s.gripSteps);

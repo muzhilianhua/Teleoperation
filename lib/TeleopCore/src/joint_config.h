@@ -16,6 +16,7 @@ namespace teleop {
 constexpr uint8_t kMaxJoints = 9;
 constexpr uint8_t kNoEncoder = 0xFF;
 constexpr int32_t kMinExoSpanCounts = 182;  // 4 deg
+constexpr int32_t kMaxExoSpanCounts = 3 * kEncoderCounts;  // 3 encoder turns
 
 struct JointDefaults {
   uint8_t servoId;
@@ -32,10 +33,10 @@ struct JointDefaults {
 struct JointSettings {
   bool enabled = false;
   uint8_t encoderIndex = kNoEncoder;
-  // Operator side: raw encoder count at endpoint A, and endpoint B as unwrapped
-  // counts relative to it (endpoint A is 0 by construction; 0 = uncalibrated).
+  // Operator side: raw encoder count at endpoint A, and endpoint B as the
+  // continuous (possibly multi-turn) count from A (A is 0; 0 = uncalibrated).
   uint16_t exoRef = 0;
-  int16_t exoB = 0;
+  int32_t exoB = 0;
   // Robot side: servo counts matching exo A / B (equal = uncalibrated).
   int16_t servoA = 0;
   int16_t servoB = 0;

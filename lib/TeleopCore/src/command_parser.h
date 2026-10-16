@@ -47,7 +47,8 @@ enum class SetKey : uint8_t {
   None,
   Enable,     // flag
   Encoder,    // values[0], kNoEncoder for "none"
-  Exo,        // values[0..1] = raw counts at A and B
+  Exo,        // values[0..1] = raw counts at A and B (legacy, span < half a turn)
+  ExoSpan,    // values[0] = raw count at A, values[1] = continuous span to B in counts
   Servo,      // values[0..1] = servo counts at A and B
   VMax,
   AMax,

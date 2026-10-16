@@ -21,10 +21,11 @@ struct JointMap {
   uint8_t encoderIndex = 0;
   uint8_t servoId = 0;
   // Operator side: exoRef is the raw reading at endpoint A; exoA/exoB are
-  // unwrapped counts relative to exoRef (exoA is 0 after capture).
+  // continuous counts relative to exoRef, possibly multi-turn (exoA is 0).
+  // Input positions come from ExoTracker, not from unwrapCounts().
   uint16_t exoRef = 0;
-  int16_t exoA = 0;
-  int16_t exoB = 0;
+  int32_t exoA = 0;
+  int32_t exoB = 0;
   // Robot side: servo counts that correspond to exoA / exoB.
   int16_t servoA = 0;
   int16_t servoB = 0;

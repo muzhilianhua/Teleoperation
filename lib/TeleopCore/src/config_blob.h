@@ -1,17 +1,18 @@
 // Fixed little-endian serialization of all joint and global settings for NVS.
 //
-// Layout (version 2: 9 joints, 213 bytes):
+// Layout (version 3: 9 joints, 231 bytes):
 //   u32 magic 'TELE' | u16 version | u8 backend | u8 jointCount
-//   jointCount x { u8 enabled, u8 encoder, u16 exoRef, i16 exoB, i16 servoA,
+//   jointCount x { u8 enabled, u8 encoder, u16 exoRef, i32 exoB, i16 servoA,
 //                  i16 servoB, u16 vmax, u16 amax, u16 vsat, u16 trackSteps,
 //                  u16 gripSteps }
 //   f32 leadMs | f32 minCutoffHz | f32 beta | f32 jumpDeg | f32 gripLoadPct |
 //   u8 loadTripEnabled
 //   u32 crc32 over everything above
 //
-// Version 1 (saved by the 8-joint M1 firmware, 172 bytes) had no gripSteps,
-// gripLoadPct or loadTripEnabled. It is still accepted (Migrated): stored
-// fields are kept, missing joints and fields get defaults.
+// Older versions are still accepted (Migrated): stored fields are kept,
+// missing joints and fields get defaults.
+//   version 2 (M2, 213 bytes): exoB was i16 (a span of less than two turns)
+//   version 1 (M1, 8 joints, 172 bytes): no gripSteps, gripLoadPct, loadTripEnabled
 //
 // Fields are written one by one (not memcpy of the structs) so the format does
 // not depend on compiler padding and host tests see the same bytes as the MCU.
@@ -26,10 +27,12 @@
 namespace teleop {
 
 constexpr uint32_t kBlobMagic = 0x454C4554u;  // "TELE"
-constexpr uint16_t kBlobVersion = 2;
-constexpr size_t kJointRecordSize = 20;
+constexpr uint16_t kBlobVersion = 3;
+constexpr size_t kJointRecordSize = 22;
 constexpr size_t kGlobalRecordSize = 21;
 constexpr size_t kBlobSize = 8 + kMaxJoints * kJointRecordSize + kGlobalRecordSize + 4;
+constexpr size_t kV2JointRecordSize = 20;
+constexpr size_t kV2BlobSize = 8 + kMaxJoints * kV2JointRecordSize + kGlobalRecordSize + 4;
 constexpr uint8_t kV1JointCount = 8;
 constexpr size_t kV1JointRecordSize = 18;
 constexpr size_t kV1GlobalRecordSize = 16;

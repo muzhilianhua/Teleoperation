@@ -90,6 +90,51 @@ void configureSample(JointSettings* joints, GlobalSettings& g) {
   g.loadTripEnabled = true;
 }
 
+// Version 2 layout (9 joints, 16-bit exo span), as written by the M2 firmware.
+size_t packV2(const JointSettings* joints, const GlobalSettings& g, uint8_t backend, uint8_t* out) {
+  size_t n = 0;
+  auto u8 = [&](uint8_t v) { out[n++] = v; };
+  auto u16 = [&](uint16_t v) {
+    u8(static_cast<uint8_t>(v & 0xFF));
+    u8(static_cast<uint8_t>(v >> 8));
+  };
+  auto u32 = [&](uint32_t v) {
+    u16(static_cast<uint16_t>(v & 0xFFFF));
+    u16(static_cast<uint16_t>(v >> 16));
+  };
+  auto f32 = [&](float v) {
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    u32(bits);
+  };
+  u32(kBlobMagic);
+  u16(2);
+  u8(backend);
+  u8(kMaxJoints);
+  for (uint8_t i = 0; i < kMaxJoints; ++i) {
+    const JointSettings& s = joints[i];
+    u8(s.enabled ? 1 : 0);
+    u8(s.encoderIndex);
+    u16(s.exoRef);
+    u16(static_cast<uint16_t>(static_cast<int16_t>(s.exoB)));
+    u16(static_cast<uint16_t>(s.servoA));
+    u16(static_cast<uint16_t>(s.servoB));
+    u16(s.vmax);
+    u16(s.amax);
+    u16(s.vsat);
+    u16(s.trackSteps);
+    u16(s.gripSteps);
+  }
+  f32(g.leadMs);
+  f32(g.minCutoffHz);
+  f32(g.beta);
+  f32(g.jumpDeg);
+  f32(g.gripLoadPct);
+  u8(g.loadTripEnabled ? 1 : 0);
+  u32(crc32(out, n));
+  return n;
+}
+
 void assertJointsEqual(const JointSettings& a, const JointSettings& b) {
   TEST_ASSERT_EQUAL(a.enabled, b.enabled);
   TEST_ASSERT_EQUAL(a.encoderIndex, b.encoderIndex);
@@ -173,7 +218,7 @@ void test_blob_round_trip() {
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
   TEST_ASSERT_EQUAL(kBlobSize, packConfig(joints, kMaxJoints, g, ServoBackend::Scs, blob, sizeof(blob)));
-  TEST_ASSERT_EQUAL(213, kBlobSize);
+  TEST_ASSERT_EQUAL(231, kBlobSize);
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
@@ -248,6 +293,64 @@ void test_blob_invalid_joint_reset_to_defaults() {
   TEST_ASSERT_EQUAL(1, bad);
   assertJointsEqual(defaultSettings(kDefaults[1]), out[1]);
   assertJointsEqual(joints[0], out[0]);
+}
+
+void test_blob_v3_keeps_multi_turn_span() {
+  JointSettings joints[kMaxJoints];
+  GlobalSettings g;
+  configureSample(joints, g);
+  joints[0].exoB = 24576;  // 1.5 encoder turns: does not fit 16 bits as before
+  uint8_t blob[kBlobSize];
+  packConfig(joints, kMaxJoints, g, ServoBackend::Scs, blob, sizeof(blob));
+  JointSettings out[kMaxJoints];
+  GlobalSettings og;
+  TEST_ASSERT_EQUAL(BlobStatus::Ok, unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults,
+                                                 kMaxJoints, kEncoders, GlobalSettings(), out, og));
+  TEST_ASSERT_EQUAL(24576, out[0].exoB);
+}
+
+void test_blob_v2_migrates() {
+  JointSettings joints[kMaxJoints];
+  GlobalSettings g;
+  configureSample(joints, g);
+  uint8_t blob[kV2BlobSize];
+  TEST_ASSERT_EQUAL(213, packV2(joints, g, static_cast<uint8_t>(ServoBackend::Scs), blob));
+  JointSettings out[kMaxJoints];
+  GlobalSettings og;
+  TEST_ASSERT_EQUAL(BlobStatus::Migrated, unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults,
+                                                       kMaxJoints, kEncoders, GlobalSettings(), out, og));
+  for (uint8_t i = 0; i < kMaxJoints; ++i) assertJointsEqual(joints[i], out[i]);
+  TEST_ASSERT_EQUAL(-1500, out[1].exoB);  // negative 16-bit span sign-extends
+  TEST_ASSERT_EQUAL_FLOAT(70.0f, og.gripLoadPct);
+  TEST_ASSERT_TRUE(og.loadTripEnabled);
+}
+
+void test_validate_span_limits() {
+  JointSettings s = defaultSettings(kDefaults[0]);
+  s.exoB = 3 * 16384;
+  TEST_ASSERT_NULL(validateJoint(s, kDefaults[0], kEncoders));
+  s.exoB = 3 * 16384 + 1;
+  TEST_ASSERT_NOT_NULL(validateJoint(s, kDefaults[0], kEncoders));
+  s.exoB = -30000;
+  TEST_ASSERT_NULL(validateJoint(s, kDefaults[0], kEncoders));
+}
+
+void test_exospan_and_legacy_exo_syntax() {
+  JointSettings joints[kMaxJoints];
+  loadDefaults(joints);
+  GlobalSettings g;
+  ParsedCommand c;
+  TEST_ASSERT_NULL(parseCommand("set 1 exospan 5000 -24576", c));
+  TEST_ASSERT_EQUAL(SetKey::ExoSpan, c.key);
+  TEST_ASSERT_TRUE(requiresDisarmed(c));
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL(5000, joints[0].exoRef);
+  TEST_ASSERT_EQUAL(-24576, joints[0].exoB);
+  TEST_ASSERT_NOT_NULL(parseCommand("set 1 exospan 5000 60000", c));  // > 3 turns
+  // Old dumps (`exo rawA rawB`) still load for short spans.
+  TEST_ASSERT_NULL(parseCommand("set 1 exo 16200 1916", c));
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL(2100, joints[0].exoB);
 }
 
 void test_blob_v1_migrates_and_keeps_calibration() {
@@ -459,6 +562,8 @@ void test_dump_round_trip() {
   JointSettings joints[kMaxJoints];
   GlobalSettings g;
   configureSample(joints, g);
+  joints[2].exoRef = 300;
+  joints[2].exoB = 20000;  // 1.2 encoder turns: only exospan can carry it
   char text[3072];
   const size_t n = formatDump(joints, kDefaults, kMaxJoints, g, text, sizeof(text));
   TEST_ASSERT_TRUE(n > 0);
@@ -509,6 +614,10 @@ int main() {
   RUN_TEST(test_blob_rejects_corruption_without_touching_output);
   RUN_TEST(test_blob_backend_mismatch_clears_servo_endpoints);
   RUN_TEST(test_blob_invalid_joint_reset_to_defaults);
+  RUN_TEST(test_blob_v3_keeps_multi_turn_span);
+  RUN_TEST(test_blob_v2_migrates);
+  RUN_TEST(test_validate_span_limits);
+  RUN_TEST(test_exospan_and_legacy_exo_syntax);
   RUN_TEST(test_blob_v1_migrates_and_keeps_calibration);
   RUN_TEST(test_blob_v1_with_wrong_size_rejected);
   RUN_TEST(test_undefined_travel_blocks_joint);
