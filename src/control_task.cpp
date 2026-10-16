@@ -198,7 +198,6 @@ void TeleopController::updateTiming(uint32_t wakeUs) {
 
 void TeleopController::cycle() {
   const float dt = 1.0f / config::kControlHz;
-  const uint32_t nowMs = millis();
   ++cycle_;
 
   if (estopRequested_) {
@@ -207,6 +206,10 @@ void TeleopController::cycle() {
   }
   Command command;
   while (xQueueReceive(commands_, &command, 0) == pdTRUE) handleCommand(command);
+  // Sampled after the commands: arming takes tens of ms and stamps
+  // lastGoodReadMs with millis(), so an earlier nowMs would make
+  // nowMs - lastGoodReadMs underflow and read as a stale (lost) bus.
+  const uint32_t nowMs = millis();
 
   encoders_.sample(cycle_ % config::kFullEncoderReadEvery == 0);
   for (JointChannel& ch : channels_) {
