@@ -28,7 +28,7 @@ Design document: <https://claude.ai/artifact/81sxWeamYJnzXBLv281o2v>
 
 ```bash
 cd Nimo_Dexhand/EE/Teleoperation
-~/.platformio/penv/bin/pio test -e native                    # host unit tests (71)
+~/.platformio/penv/bin/pio test -e native                    # host unit tests (85)
 ~/.platformio/penv/bin/pio run -e esp32-s3-n32r16 -t upload  # build + flash
 ~/.platformio/penv/bin/pio device monitor                    # console
 ```
@@ -47,7 +47,7 @@ Joints are addressed by **servo id**. Travel limits come from servo_bringup and 
 | 6 | thumb_mcp_rot | 300–700 | 690 | 365 | |
 | 7 | thumb_mcp | 650–900 | 400 | 50 | Placeholder speeds: re-measure with `sweep 7` |
 | 8 | thumb_ip | 20–280 | 380 | 230 | |
-| 9 | joint9 | undefined | 400 | 50 | New servo: name and travel still to be entered |
+| 9 | joint9 | 480–950 | 400 | 50 | Encoder turns 1–2× over the travel (transmission): **multi-turn, needs `home 9`**, see below |
 
 Units are steps/s; `amax` defaults to 8000 steps/s².
 
@@ -85,8 +85,28 @@ Run every step disarmed. Settings live in RAM until `save`.
    - open → `cal 2 a`
    - closed → `cal 2 b`
 
-   A ↔ A and B ↔ B sets the direction.
+   A ↔ A and B ↔ B sets the direction. Between `cal a` and `cal b`, move the joint continuously; the encoder may turn any number of times (up to 3). If tracking is interrupted (encoder dropout), `cal b` is refused; redo `cal a`.
 5. Check `joints` shows `ready yes`. Then `save`. Back up with `dump`: paste its output to restore.
+
+## Multi-turn joints and homing (`home <j>`)
+
+Each joint's exo position is tracked continuously from endpoint A, by summing the shortest step between samples. This stays exact while the encoder turns less than half a turn per cycle, i.e. below 18000°/s at 100 Hz. So the calibrated span may cover several encoder turns. This is the case for joint 9, whose transmission turns the encoder 1–2 times over its travel.
+
+**What happens at power-up.** The turn count is unknown; `joints` shows it in the `home` column.
+
+| `home` column | Joint type | Behaviour |
+|---|---|---|
+| `auto` | Single-turn: span + 2 × 10° dead zone < 360° | Exactly one position matches the raw reading, so the joint homes itself. This also covers spans between 180° and 360° that crossed the old fold limit |
+| `wait` | Single-turn | The glove is in the unused arc; move it into range |
+| `HOME!` / `homed` | Multi-turn | Several positions match. Hold the glove at **pose A** (the `cal a` pose) and run `home <j>`; only that joint needs to be disarmed. The turn nearest A is taken. A result outside the calibrated range is refused, e.g. when the glove is not at A. `arm` refuses an unhomed joint |
+
+**Losing the home.**
+- Causes: no valid sample for 100 ms (encoder dropout), or 3 rejected jumps in a row.
+- A single-turn joint re-resolves at once.
+- A multi-turn joint goes to HOLD. After 3 s it is switched off with a message to `home` it again.
+- Moving a multi-turn joint while the ESP32 is off is harmless: you home it at the next power-up anyway.
+
+**Planned mechanical fix.** Change joint 9's transmission so its full travel stays within one encoder turn, ideally ≤ 300°. Then redo `cal 9 a` / `cal 9 b`: the joint becomes single-turn and homes itself. No firmware change is needed.
 
 ## Speed sweep (`sweep <j>`)
 
@@ -145,7 +165,8 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 | `disarm` / `disarm <j>` / `x` | Torque off: all joints / one joint / E-stop on every servo. BOOT does the same as `x` |
 | `set <j> enc <n\|none>` / `set <j> on\|off` | Assign encoder / enable joint. Disarmed only |
 | `cal <j> a\|b` / `cal <j> hand a\|b` | Capture the exo endpoint / the servo endpoint (move the finger by hand). Disarmed only |
-| `set <j> exo <rawA> <rawB>` / `set <j> servo <a> <b>` | Enter endpoints directly (the `dump` format) |
+| `home <j>` | Multi-turn joint: the glove is at pose A, fix the turn count. Only that joint must be disarmed |
+| `set <j> exospan <rawA> <span>` / `set <j> servo <a> <b>` | Enter endpoints directly (the `dump` format; span in counts, multi-turn allowed). The old `set <j> exo <rawA> <rawB>` from earlier dumps still works for spans below half a turn |
 | `set <j> vmax\|amax\|vsat\|trk\|grip <n>` | Per-joint motion, tracking and grip parameters. Allowed while armed |
 | `set lead\|mincut\|beta\|jump\|gripload <v>` | Global parameters. Allowed while armed |
 | `set loadtrip on\|off` | Firmware load trips (off = only the servo's overload protection decides) |
@@ -189,8 +210,8 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 - Torque-off is broadcast to all 9 servos at boot and on E-stop: SCS0009 has no communication watchdog.
 - `save`, `limits` and `sweep` are refused while any joint is armed.
 
-**NVS.** Format version 2 is 213 bytes and holds 9 joints plus the grip fields.
-- Version 1 (M1, 8 joints) migrates on load.
+**NVS.** Format version 3 is 231 bytes and holds 9 joints, the grip fields and a 32-bit exo span.
+- Versions 2 (M2) and 1 (M1, 8 joints) migrate on load; run `save` afterwards.
 - Missing, corrupt or unknown-version data is rejected, and defaults are used.
 - Data saved for another servo series keeps the exo calibration but clears the servo endpoints.
 
@@ -213,6 +234,11 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
    - With `set loadtrip on`, block one finger: only that joint goes off, and `arm <j>` re-arms it. Then `set loadtrip off`.
    - Unplug one encoder: that joint goes to HOLD, then off after 3 s.
    - Press BOOT: everything goes off.
+6. **Multi-turn joint 9.**
+   - Run `cal 9 hand a/b`, then `cal 9 a` at the open pose. Turn slowly to the other end and run `cal 9 b`: `joints` shows a span of 360–720° and `HOME!`/`homed`. Then `save` and reboot.
+   - `arm 9` must be refused and ask for `home 9`. Run `home 9` at pose A, then `arm 9`: it follows the full travel with no jump when the encoder crosses 0°.
+   - `home 9` with the glove near B must be refused.
+   - Unplug and replug encoder 0x40: joint 9 goes to HOLD, then off after 3 s with a request to `home` it.
 
 ## Layout
 
@@ -223,7 +249,8 @@ lib/FeetechProtocol/      pure C++ packet codec (host-tested)
 lib/FeetechBus/           UART transport, ServoBus interface (incl. angle limits), ScsBus backend
 lib/TeleopCore/           pure C++, host-tested:
   joint_map / joint_config  mapping, per-joint settings, validation
-  config_blob               NVS serialization (CRC32, version 2, v1 migration, servo series)
+  config_blob               NVS serialization (CRC32, version 3, v1/v2 migration, servo series)
+  exo_tracker               continuous multi-turn exo position, auto-resolve / homing
   command_parser            console grammar, settings edits, dump format
   supervisor                per-joint checks, fault scope
   grip_limiter              load-adaptive goal lead cap
@@ -233,7 +260,7 @@ src/control_task.*        100 Hz loop on core 1: per-joint states, reads, arming
 src/config_store.*        Preferences (NVS) read/write
 src/console.*             USB console on core 0
 src/main.cpp              setup and task start
-test/                     Unity tests (native): packet, core, config, sweep
+test/                     Unity tests (native): packet, core, config, sweep, tracker
 ```
 
 ## Vendored code
