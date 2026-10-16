@@ -112,7 +112,8 @@ void Console::printHelp() {
       "  disarm [<j>] | x     torque off: all / one joint;  x = E-stop (BOOT button too)\n"
       "  set <j> enc <n|none> assign encoder #n      set <j> on|off   enable joint\n"
       "  cal <j> a|b          capture exo endpoint   cal <j> hand a|b servo endpoint (move by hand)\n"
-      "  set <j> exo <rawA> <rawB> | servo <a> <b>   enter endpoints directly\n"
+      "  home <j>             multi-turn joint: glove held at pose A, fixes the turn count\n"
+      "  set <j> exospan <rawA> <span> | servo <a> <b>  enter endpoints directly (dump format)\n"
       "  set <j> vmax|amax|vsat|trk|grip <n>        per-joint speed / tracking / grip lead (0 = off)\n"
       "  set lead|mincut|beta|jump|gripload <v>     global parameters\n"
       "  set loadtrip on|off                        firmware load trips (off: servo overload decides)\n"
@@ -140,9 +141,10 @@ void Console::printStatus() {
                   j.gripLead, j.contact ? "*" : " ", j.speedRegister);
     if (j.readAgeMs <= config::kServoCommStaleMs) {
       Serial.printf("  pos %4d tq %d load %5.1f%% %.1fV %dC%s\n", j.servo.position, j.servo.torqueOn,
-                    j.servo.loadPct, j.servo.voltage, j.servo.temperatureC, j.encFresh ? "" : "  ENC!");
+                    j.servo.loadPct, j.servo.voltage, j.servo.temperatureC,
+                    !j.homed ? "  HOME!" : (j.encFresh ? "" : "  ENC!"));
     } else {
-      Serial.printf("  servo: no recent reply%s\n", j.encFresh ? "" : "  ENC!");
+      Serial.printf("  servo: no recent reply%s\n", !j.homed ? "  HOME!" : (j.encFresh ? "" : "  ENC!"));
     }
   }
   const teleop::GlobalSettings& g = s.global;
@@ -154,7 +156,7 @@ void Console::printStatus() {
 void Console::printJoints() {
   controller_.snapshot(snapshot_);
   Serial.println(
-      "id name           on enc  exo span   servo A..B   travel     vmax amax  vsat trk  ready state  last fault");
+      "id name           on enc  exo span   servo A..B   travel     vmax amax  vsat trk  ready home  state  last fault");
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     const teleop::JointDefaults& d = config::kJoints[i];
     const JointSnapshot& j = snapshot_.joints[i];
@@ -167,7 +169,7 @@ void Console::printJoints() {
     }
     char exo[12];
     if (teleop::exoCalibrated(s)) {
-      snprintf(exo, sizeof(exo), "%6.1f", s.exoB * teleop::kDegreesPerCount);
+      snprintf(exo, sizeof(exo), "%7.1f", s.exoB * teleop::kDegreesPerCount);
     } else {
       strlcpy(exo, j.refCaptured ? "  A only" : "     --", sizeof(exo));
     }
@@ -183,9 +185,11 @@ void Console::printJoints() {
     } else {
       strlcpy(travel, " undefined", sizeof(travel));
     }
-    Serial.printf("%2u %-14s %d  %-4s %-9s  %s  %s %4u %5u %4u %4u  %-5s %-6s %s\n", d.servoId,
+    // auto = single-turn, homes itself; homed / HOME! = multi-turn, needs `home <j>` at pose A
+    const char* home = j.singleTurn ? (j.homed ? "auto " : "wait ") : (j.homed ? "homed" : "HOME!");
+    Serial.printf("%2u %-14s %d  %-4s %-9s  %s  %s %4u %5u %4u %4u  %-5s %s %-6s %s\n", d.servoId,
                   d.name, s.enabled, enc, exo, servo, travel, s.vmax, s.amax, s.vsat, s.trackSteps,
-                  j.ready ? "yes" : "no", jointStateToString(j.state),
+                  j.ready ? "yes" : "no", home, jointStateToString(j.state),
                   j.lastFault == teleop::Fault::None ? "-" : teleop::faultToString(j.lastFault));
   }
 }

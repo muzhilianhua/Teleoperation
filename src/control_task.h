@@ -1,4 +1,4 @@
-// 100 Hz control loop over the joint table: encoder -> jump guard -> filter ->
+// 100 Hz control loop over the joint table: encoder -> exo tracker -> filter ->
 // map -> rate limit -> one SYNC_WRITE per cycle. Every joint has its own state
 // machine (OFF/ALIGN/FOLLOW/HOLD) so a joint-level fault only switches that
 // joint off; hand-level faults switch everything off. Also owns arming, safety
@@ -16,7 +16,7 @@
 #include <feetech_port.h>
 #include <grip_limiter.h>
 #include <joint_config.h>
-#include <jump_guard.h>
+#include <exo_tracker.h>
 #include <one_euro.h>
 #include <rate_limiter.h>
 #include <servo_bus.h>
@@ -62,7 +62,9 @@ struct JointSnapshot {
   JointState state = JointState::Off;
   teleop::Fault lastFault = teleop::Fault::None;  // what last switched this joint off
   bool ready = false;
-  bool refCaptured = false;  // `cal a` done (or exo calibrated)
+  bool refCaptured = false;  // `cal a` done and tracked since, `cal b` still to do
+  bool homed = false;        // exo turn count known (see ExoTracker)
+  bool singleTurn = true;    // calibrated range fits one encoder turn: homes itself
   bool encFresh = false;
   uint16_t encRaw = 0;
   float exoCounts = 0.0f;          // unwrapped, relative to exoRef
@@ -125,12 +127,12 @@ class TeleopController {
     teleop::OneEuroFilter filter;
     teleop::RateLimiter limiter;
     teleop::RateLimiter model;
-    teleop::JumpGuard guard;
+    teleop::ExoTracker tracker;
     teleop::JointSupervisor supervisor;
     teleop::GripLimiter grip;
     JointState state = JointState::Off;
     teleop::Fault lastFault = teleop::Fault::None;
-    bool refCaptured = false;
+    bool wasHomed = false;
     // Encoder path
     uint8_t encBad = 0;
     bool encFresh = false;
@@ -166,7 +168,7 @@ class TeleopController {
   void run();
   void cycle();
   void updateTiming(uint32_t wakeUs);
-  void processEncoder(JointChannel& ch, float dt);
+  void processEncoder(JointChannel& ch, float dt, uint32_t nowMs);
   bool encoderSample(uint8_t index, uint16_t& raw) const;
   void readServos(uint32_t nowMs);
   void readMonitor();
@@ -177,6 +179,7 @@ class TeleopController {
   void handleSet(const Command& command);
   void handleCal(const Command& command);
   void handleCalHand(const Command& command);
+  void handleHome(uint8_t servoId);
   void handleLimitsCheck();
   void handleLimitsWrite(uint8_t servoId);
   void handleSweep(uint8_t servoId);

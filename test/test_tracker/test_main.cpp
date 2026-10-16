@@ -137,6 +137,10 @@ void test_calibration_flow_measures_multi_turn_span() {
   sweepTo(t, rawA, 0, span, 0);
   TEST_ASSERT_TRUE(t.continuous());
   TEST_ASSERT_EQUAL(span, t.position());  // what cal b stores
+  t.setSpan(span);
+  TEST_ASSERT_TRUE(t.homed());  // no re-home needed right after calibration
+  TEST_ASSERT_FALSE(t.singleTurn());
+  TEST_ASSERT_EQUAL(span, t.position());
 }
 
 void test_uncalibrated_resolves_nearest_but_not_continuous() {

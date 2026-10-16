@@ -8,7 +8,6 @@
 
 using teleop::Fault;
 using teleop::FaultScope;
-using teleop::JumpGuard;
 using teleop::Verb;
 
 namespace {
@@ -133,9 +132,9 @@ uint8_t TeleopController::armedCount() const {
 
 void TeleopController::resetChannelRuntime(JointChannel& ch) {
   ch.filter.reset();
-  ch.guard.reset();
+  ch.tracker.configure(ch.settings.exoRef, ch.settings.exoB, config::kExoDeadZoneCounts);
+  ch.wasHomed = false;
   ch.supervisor.reset();
-  ch.refCaptured = teleop::exoCalibrated(ch.settings);
   ch.state = JointState::Off;
   ch.encBad = 0;
   ch.encFresh = false;
@@ -144,7 +143,8 @@ void TeleopController::resetChannelRuntime(JointChannel& ch) {
 
 void TeleopController::applyRuntimeParams(JointChannel& ch) {
   ch.filter.setParams(global_.minCutoffHz, global_.beta, config::kFilterDCutoffHz);
-  ch.guard.setMaxStep(global_.jumpDeg);
+  ch.tracker.setMaxStep(static_cast<int32_t>(global_.jumpDeg / teleop::kDegreesPerCount));
+  ch.tracker.setLossMs(config::kTrackingLossMs);
   teleop::SupervisorConfig sc;
   sc.trackingErrorSteps = ch.settings.trackSteps;
   sc.loadTripEnabled = global_.loadTripEnabled;
@@ -213,8 +213,10 @@ void TeleopController::cycle() {
 
   encoders_.sample(cycle_ % config::kFullEncoderReadEvery == 0);
   for (JointChannel& ch : channels_) {
-    if (ch.settings.enabled && ch.settings.encoderIndex < config::kEncoderCount) {
-      processEncoder(ch, dt);
+    // Tracked whether enabled or not: calibration and homing need an
+    // unbroken position history, and multi-turn joints lose it on a gap.
+    if (ch.settings.encoderIndex < config::kEncoderCount) {
+      processEncoder(ch, dt, nowMs);
     } else {
       ch.encFresh = false;
       ch.encBad = 0;
@@ -234,31 +236,38 @@ bool TeleopController::encoderSample(uint8_t index, uint16_t& raw) const {
   return true;
 }
 
-void TeleopController::processEncoder(JointChannel& ch, float dt) {
+void TeleopController::processEncoder(JointChannel& ch, float dt, uint32_t nowMs) {
   uint16_t raw = 0;
   if (!encoderSample(ch.settings.encoderIndex, raw)) {
+    ch.tracker.noSample(nowMs);
     ch.encFresh = false;
     if (ch.encBad < 0xFF) ++ch.encBad;
     return;
   }
-  const float deg = teleop::unwrapCounts(raw, ch.settings.exoRef) * teleop::kDegreesPerCount;
-  const JumpGuard::Result guard = ch.guard.check(deg);
-  if (guard != JumpGuard::Result::Accepted) {
-    ++ch.jumpRejects;
+  ch.encRaw = raw;
+  const teleop::ExoTracker::Result r = ch.tracker.update(raw, nowMs);
+  if (r != teleop::ExoTracker::Result::Accepted) {
     ch.encFresh = false;
     if (ch.encBad < 0xFF) ++ch.encBad;
-    if (guard == JumpGuard::Result::Resynced) {
-      ch.filter.reset();
-      message("joint %u: encoder jumped > %.0f deg per cycle 3 times, re-synced", ch.def->servoId,
-              global_.jumpDeg);
+    if (r == teleop::ExoTracker::Result::Rejected || r == teleop::ExoTracker::Result::Lost) ++ch.jumpRejects;
+    if (r == teleop::ExoTracker::Result::Lost) {
+      message("joint %u: encoder jumped > %.0f deg per cycle 3 times, tracking lost%s", ch.def->servoId,
+              global_.jumpDeg, ch.tracker.singleTurn() ? " (re-resolving)" : "; `home` it at pose A");
     }
+    if (ch.wasHomed && !ch.tracker.homed() && !ch.tracker.singleTurn() && ch.tracker.calibrated()) {
+      message("joint %u: multi-turn position lost; hold the glove at pose A and run `home %u`",
+              ch.def->servoId, ch.def->servoId);
+    }
+    ch.wasHomed = ch.tracker.homed();
     return;
   }
+  if (!ch.wasHomed) ch.filter.reset();  // position (re)acquired: do not glide from a stale value
+  ch.wasHomed = true;
 
   ch.encFresh = true;
   ch.encBad = 0;
-  ch.encRaw = raw;
-  ch.exoCounts = deg / teleop::kDegreesPerCount;
+  const float deg = ch.tracker.position() * teleop::kDegreesPerCount;
+  ch.exoCounts = static_cast<float>(ch.tracker.position());
   ch.exoFiltered = ch.filter.filter(deg, dt) / teleop::kDegreesPerCount;
   if (!teleop::exoCalibrated(ch.settings)) return;
 
@@ -457,7 +466,9 @@ void TeleopController::stepJoint(uint8_t index, float dt, uint32_t nowMs) {
         ch.encGoodTiming = false;
       }
       if (nowMs - ch.holdSinceMs > config::kHoldTimeoutMs) {
-        disarmJoint(index, Fault::None, "encoder lost > 3 s");
+        disarmJoint(index, Fault::None,
+                    ch.tracker.homed() ? "encoder lost > 3 s"
+                                       : "exo position lost > 3 s (multi-turn: `home` it at pose A)");
         return;
       }
       break;
@@ -549,6 +560,7 @@ void TeleopController::handleCommand(const Command& c) {
       break;
     case Verb::Cal: handleCal(c); break;
     case Verb::CalHand: handleCalHand(c); break;
+    case Verb::Home: handleHome(c.joint); break;
     case Verb::Set: handleSet(c); break;
     case Verb::Save: saveConfig(); break;
     case Verb::Load: loadConfig(false); break;
@@ -580,8 +592,8 @@ void TeleopController::handleSet(const Command& c) {
     ch.settings = next;
     if (mappingChanged) {
       ch.filter.reset();
-      ch.guard.reset();
-      ch.refCaptured = teleop::exoCalibrated(ch.settings);
+      ch.tracker.configure(ch.settings.exoRef, ch.settings.exoB, config::kExoDeadZoneCounts);
+      ch.wasHomed = false;
     }
     applyRuntimeParams(ch);
   }
@@ -591,9 +603,10 @@ void TeleopController::handleSet(const Command& c) {
             global_.loadTripEnabled ? "on" : "off");
   } else if (JointChannel* ch = channelForServo(c.joint)) {
     const teleop::JointSettings& s = ch->settings;
-    message("joint %u: %s enc %d exo %d servo %d..%d vmax %u amax %u vsat %u trk %u grip %u", c.joint,
+    message("joint %u: %s enc %d exo %ld servo %d..%d vmax %u amax %u vsat %u trk %u grip %u", c.joint,
             s.enabled ? "on" : "off", s.encoderIndex == teleop::kNoEncoder ? -1 : s.encoderIndex,
-            s.exoB, s.servoA, s.servoB, s.vmax, s.amax, s.vsat, s.trackSteps, s.gripSteps);
+            static_cast<long>(s.exoB), s.servoA, s.servoB, s.vmax, s.amax, s.vsat, s.trackSteps,
+            s.gripSteps);
   }
 }
 
@@ -612,29 +625,63 @@ void TeleopController::handleCal(const Command& c) {
     message("joint %u: encoder %u not healthy, capture refused", c.joint, ch->settings.encoderIndex);
     return;
   }
+  const uint32_t nowMs = millis();
   if (!c.flag) {
     ch->settings.exoRef = raw;
     ch->settings.exoB = 0;  // B is relative to the new reference: capture it again
-    ch->refCaptured = true;
+    ch->tracker.configure(raw, 0, config::kExoDeadZoneCounts);
+    ch->tracker.homeAtA(raw, nowMs);
+    ch->wasHomed = true;
     ch->filter.reset();
-    ch->guard.reset();
-    message("joint %u: exo A captured (raw %u). Move to the other end and run `cal %u b`.", c.joint,
-            raw, c.joint);
+    message("joint %u: exo A captured (raw %u). Move to the other end, through as many turns as it "
+            "takes, and run `cal %u b`.", c.joint, raw, c.joint);
     return;
   }
-  if (!ch->refCaptured) {
-    message("joint %u: run `cal %u a` first", c.joint, c.joint);
+  // B is the position tracked continuously since A, so multi-turn spans are exact.
+  if (!ch->tracker.continuous()) {
+    message("joint %u: tracking was interrupted since `cal %u a` (or it was not run): redo `cal %u a`",
+            c.joint, c.joint, c.joint);
     return;
   }
-  const int32_t span = teleop::unwrapCounts(raw, ch->settings.exoRef);
-  if (abs(span) < teleop::kMinExoSpanCounts) {
-    message("joint %u: span %.1f deg is too small, rejected", c.joint, span * teleop::kDegreesPerCount);
+  const int32_t span = ch->tracker.position();
+  if (labs(span) < teleop::kMinExoSpanCounts || labs(span) > teleop::kMaxExoSpanCounts) {
+    message("joint %u: span %.1f deg rejected (4 deg .. 3 turns)", c.joint, span * teleop::kDegreesPerCount);
     return;
   }
-  ch->settings.exoB = static_cast<int16_t>(span);
+  ch->settings.exoB = span;
+  ch->tracker.setSpan(span);
+  message("joint %u: exo B captured, span %.1f deg (%.2f encoder turns, %s)", c.joint,
+          span * teleop::kDegreesPerCount, span / static_cast<float>(teleop::kEncoderCounts),
+          ch->tracker.singleTurn() ? "single-turn: homes itself at boot"
+                                   : "multi-turn: run `home` at pose A after every power-up");
+}
+
+void TeleopController::handleHome(uint8_t servoId) {
+  JointChannel* ch = channelForServo(servoId);
+  if (ch == nullptr) {
+    message("no joint with servo id %u", servoId);
+    return;
+  }
+  if (ch->armed()) {
+    message("joint %u is armed: `disarm %u` before homing", servoId, servoId);
+    return;
+  }
+  uint16_t raw = 0;
+  if (ch->settings.encoderIndex >= config::kEncoderCount || !encoderSample(ch->settings.encoderIndex, raw)) {
+    message("joint %u: no healthy encoder sample, home refused", servoId);
+    return;
+  }
+  const char* error = ch->tracker.home(raw, millis());
+  if (error != nullptr) {
+    message("joint %u: home refused: %s", servoId, error);
+    return;
+  }
+  ch->wasHomed = true;
   ch->filter.reset();
-  ch->guard.reset();
-  message("joint %u: exo B captured, span %.1f deg", c.joint, span * teleop::kDegreesPerCount);
+  const float pct = 100.0f * ch->tracker.position() / static_cast<float>(ch->settings.exoB);
+  message("joint %u homed: %.1f deg from A (%.0f %% of the span)%s", servoId,
+          ch->tracker.position() * teleop::kDegreesPerCount, pct,
+          ch->tracker.singleTurn() ? " (single-turn joints also home themselves)" : "");
 }
 
 void TeleopController::handleCalHand(const Command& c) {
@@ -939,6 +986,11 @@ bool TeleopController::preflight(uint8_t index, ServoState& st) {
     message("arm refused: joint %u %s", id, notReadyReason(ch.settings, *ch.def));
     return false;
   }
+  if (!ch.tracker.homed()) {
+    message("arm refused: joint %u multi-turn position unknown: hold the glove at pose A and run `home %u`",
+            id, id);
+    return false;
+  }
   if (!ch.encFresh) {
     message("arm refused: joint %u encoder not healthy", id);
     return false;
@@ -1142,7 +1194,9 @@ void TeleopController::publish() {
     j.state = ch.state;
     j.lastFault = ch.lastFault;
     j.ready = teleop::jointReady(ch.settings, *ch.def, config::kEncoderCount);
-    j.refCaptured = ch.refCaptured;
+    j.refCaptured = !teleop::exoCalibrated(ch.settings) && ch.tracker.continuous();
+    j.homed = ch.tracker.homed();
+    j.singleTurn = !teleop::exoCalibrated(ch.settings) || ch.tracker.singleTurn();
     j.encFresh = ch.encFresh;
     j.encRaw = ch.encRaw;
     j.exoCounts = ch.exoCounts;

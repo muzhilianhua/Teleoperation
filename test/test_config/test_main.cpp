@@ -472,6 +472,16 @@ void test_parse_grip_commands() {
   TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
 }
 
+void test_parse_home_command() {
+  ParsedCommand c;
+  TEST_ASSERT_NULL(parseCommand("home 9", c));
+  TEST_ASSERT_EQUAL(Verb::Home, c.verb);
+  TEST_ASSERT_EQUAL(9, c.joint);
+  TEST_ASSERT_FALSE(requiresDisarmed(c));  // only the homed joint must be off
+  TEST_ASSERT_NOT_NULL(parseCommand("home", c));
+  TEST_ASSERT_NOT_NULL(parseCommand("home all", c));
+}
+
 void test_parse_sweep_commands() {
   ParsedCommand c;
   TEST_ASSERT_NULL(parseCommand("sweep 3", c));
@@ -626,6 +636,7 @@ int main() {
   RUN_TEST(test_parse_limits_commands);
   RUN_TEST(test_parse_grip_commands);
   RUN_TEST(test_parse_sweep_commands);
+  RUN_TEST(test_parse_home_command);
   RUN_TEST(test_parse_errors);
   RUN_TEST(test_requires_disarmed);
   RUN_TEST(test_apply_validates_and_is_atomic);

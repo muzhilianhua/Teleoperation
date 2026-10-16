@@ -41,6 +41,7 @@ enum class Verb : uint8_t {
   LimitsWrite,  // joint 0 = all joints
   Sweep,        // joint
   SweepApply,   // joint
+  Home,         // joint: glove held at pose A, fixes a multi-turn joint's turn count
 };
 
 enum class SetKey : uint8_t {

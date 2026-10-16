@@ -95,6 +95,13 @@ constexpr uint16_t kStreamSpeedCap = 1000;
 constexpr uint8_t kEncoderFailCycles = 3;    // consecutive bad reads -> HOLD
 constexpr uint32_t kHoldTimeoutMs = 3000;    // HOLD longer than this -> torque off
 constexpr uint32_t kHoldRecoverMs = 200;     // encoder healthy this long -> re-ALIGN
+// Exo tracking (multi-turn capable). A gap longer than this may hide more
+// than half an encoder turn (finger speed x transmission ratio), so a
+// multi-turn joint must be homed again; single-turn joints re-resolve.
+constexpr uint32_t kTrackingLossMs = 100;
+// Dead zone beyond each calibrated end (10 deg) used to resolve single-turn
+// joints at boot; range + 2 x dead zone >= one turn makes a joint multi-turn.
+constexpr int32_t kExoDeadZoneCounts = 455;
 
 // ---- Monitor mode -----------------------------------------------------------
 constexpr uint32_t kMonitorPeriodMs = 100;   // console table rate

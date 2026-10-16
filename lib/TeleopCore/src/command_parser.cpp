@@ -250,6 +250,15 @@ const char* parseCommand(const char* line, ParsedCommand& out) {
     }
     return verb == Verb::Arm ? "usage: arm [<joint>]" : "usage: disarm [<joint>]";
   }
+  if (eq(cmd, "home")) {
+    long joint = 0;
+    if (tk.n == 2 && parseInt(tk.t[1], 1, 253, joint)) {
+      out.verb = Verb::Home;
+      out.joint = static_cast<uint8_t>(joint);
+      return nullptr;
+    }
+    return "usage: home <joint>  (glove held at pose A)";
+  }
   if (eq(cmd, "sweep")) {
     long joint = 0;
     if ((tk.n == 2 || (tk.n == 3 && eq(tk.t[2], "apply"))) && parseInt(tk.t[1], 1, 253, joint)) {

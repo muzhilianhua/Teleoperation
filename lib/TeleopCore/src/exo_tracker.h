@@ -33,6 +33,9 @@ class ExoTracker {
   // Calibration changed: reference raw count at A, span to B (counts, 0 =
   // uncalibrated) and dead zone beyond each end. Drops the home.
   void configure(uint16_t exoRef, int32_t exoB, int32_t deadZoneCounts);
+  // `cal b`: the span to B is now known. Unlike configure() the position and
+  // home are kept, since they were tracked continuously from A.
+  void setSpan(int32_t exoB) { exoB_ = exoB; }
   void setMaxStep(int32_t counts) { maxStep_ = counts; }  // <= 0 disables the jump check
   void setLossMs(uint32_t ms) { lossMs_ = ms; }
 
