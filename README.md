@@ -2,7 +2,13 @@
 
 Exoskeleton encoders (AS5048B) drive the dexterous hand's Feetech servos. The control loop runs entirely on the ESP32-S3; a PC is optional and only listens.
 
-**Current milestone: M2, full hand with 9 joints.** It adds:
+**Current target: the rebuilt hand (SCS0009 + HLS3606 on one bus), same glove and wiring.** It adds, on top of M2:
+- per-servo models on one bus: each id is identified at boot and encoded/decoded as SCS0009 or HLS3606;
+- HLS3606 arming checks, a goal current (`ilimit`) and an over-current trip;
+- speeds in steps/s end to end, with step-based defaults and tolerances scaled per model;
+- a new joint table (placeholders until measured) and NVS format v4: earlier calibrations are discarded.
+
+M2 (full hand with 9 joints) added:
 - per-joint state machines with fault isolation;
 - round-robin servo reads;
 - an on-device speed sweep that measures each joint's speed limits;
@@ -17,7 +23,7 @@ Design document: <https://claude.ai/artifact/81sxWeamYJnzXBLv281o2v>
 |---|---|
 | MCU | ESP32-S3-WROOM-2-N32R16V DevKit |
 | Encoders | AS5048B × 9 on one I2C bus: SDA GPIO8, SCL GPIO9, 400 kHz. Addresses `0x40 0x44 … 0x60` (encoder #0–#8) burned into OTP |
-| Servo bus | 9 × SCS0009, IDs 1–9, via the FE-URT-2 TTL port at 1 Mbps: GPIO17 (TX) → URT-2 RX, GPIO18 (RX) ← URT-2 TX, common GND |
+| Servo bus | IDs 1–9, mixed models (see *Joints*), via the FE-URT-2 TTL port at 1 Mbps: GPIO17 (TX) → URT-2 RX, GPIO18 (RX) ← URT-2 TX, common GND |
 | Servo power | ~6 V. The supervisor switches the hand off outside 5.5–6.5 V. **Use a supply with ample current before full-hand or grasp tests**: servo_bringup recorded 6 V sag tripping every servo at once |
 | E-stop | DevKit BOOT button (GPIO0) |
 | Console | Native USB port (`USB` connector), 115200 |
@@ -28,49 +34,54 @@ Design document: <https://claude.ai/artifact/81sxWeamYJnzXBLv281o2v>
 
 ```bash
 cd Nimo_Dexhand/EE/Teleoperation
-~/.platformio/penv/bin/pio test -e native                    # host unit tests (85)
+~/.platformio/penv/bin/pio test -e native                    # host unit tests (94)
 ~/.platformio/penv/bin/pio run -e esp32-s3-n32r16 -t upload  # build + flash
 ~/.platformio/penv/bin/pio device monitor                    # console
 ```
 
 ## Joints
 
-Joints are addressed by **servo id**. Travel limits come from servo_bringup and can only be changed in `include/config.h`, never from the console.
+Joints are addressed by **servo id**. Model, name and travel live in `kJoints` in `include/config.h` and can only be changed there, never from the console.
 
-| ID | Joint | Travel | vmax | vsat | Note |
-|---|---|---|---|---|---|
-| 1 | triple_pip | 350–730 | 660 | 245 | Boot default: enabled, encoder #5 |
-| 2 | triple_dip | 600–890 | 660 | 370 | |
-| 3 | index_pip | 250–600 | 400 | 50 | Placeholder speeds: re-measure with `sweep 3` |
-| 4 | index_dip | 250–590 | 400 | 50 | Placeholder speeds: re-measure with `sweep 4` |
-| 5 | index_mcp | 435–600 | 400 | 50 | Placeholder speeds: re-measure with `sweep 5` |
-| 6 | thumb_mcp_rot | 300–700 | 690 | 365 | |
-| 7 | thumb_mcp | 650–900 | 400 | 50 | Placeholder speeds: re-measure with `sweep 7` |
-| 8 | thumb_ip | 20–280 | 380 | 230 | |
-| 9 | joint9 | 480–950 | 400 | 50 | Encoder turns 1–2× over the travel (transmission): **multi-turn, needs `home 9`**, see below |
+| ID | Model | Name | Travel | Default vmax / vsat (own steps/s) |
+|---|---|---|---|---|
+| 1, 3, 5 | SCS0009 | `id1`, `id3`, `id5` | undefined (0, 0) | 400 / 50 |
+| 2, 4, 6, 7, 8, 9 | HLS3606 | `id2` … `id9` | undefined (0, 0) | 1333 / 167 |
 
-Units are steps/s; `amax` defaults to 8000 steps/s².
+Names and travel are **placeholders** until the rebuilt hand is measured on the bench (see *Bring-up*); every joint boots disabled. The models come from the 2026-10-21 bus scan.
+
+**Two models, one bus.**
+
+| | SCS0009 | HLS3606 |
+|---|---|---|
+| Resolution | 1024 steps ≈ 300°, 0.293°/step | 4096 steps/turn, 0.088°/step (1 SCS step ≈ 3.333 HLS steps) |
+| Speed register | ≈ steps/s, 0 = full speed | ≈ 49.97 steps/s per unit, 0 = stop, max 250 |
+| Goal block (reg 42) | position, time = 0, speed | position, **goal current** (6.5 mA/unit), speed |
+| Lock register | 48 | 55 |
+| Factory angle limits | single-turn | 0/0 = multi-turn: **must be written before arming** |
+
+Both models share one SYNC_WRITE (address 42, 6 bytes per servo); each entry is encoded in its own model's byte order.
+
+**Units.** Every per-joint value is in **that servo's own steps**: `servo A/B`, travel, `vmax`/`vsat` (steps/s), `amax` (steps/s²), `trk`, `grip`. The firmware's fixed step values (arm speed 50, align tolerance 3, arm hold tolerance 5, stream speed floor 50, sweep tiers and margins, grip-limiter steps) are SCS0009 steps and are multiplied by 3.333 on an HLS3606 joint, so both models move the same angle. Defaults scale the same way: `trk` 40 → 133, `grip` 60 → 200.
 
 - **`vmax`** is the rate-limiter ceiling, about 1.2 × the faster-direction saturation speed.
 - **`vsat`** feeds the tracking check, about 0.9 × the slower-direction saturation speed.
+- **`ilimit`** (HLS only, mA): the goal current is the servo's own protection current (register 28, factory 800 = 5.2 A), or `ilimit` if lower. `0` = protection current. Range 7–13306.
 
-**Adding joint 9's travel.** A joint whose travel is `0, 0` can be monitored but not enabled, calibrated, swept or armed.
-1. Disarm, then run `monitor on`.
-2. Move the finger by hand to both mechanical ends and read the servo 9 column.
-3. Enter `min + 15` and `max − 15` (and a real name) in `kJoints` in `include/config.h`, then reflash.
-4. Run `limits write 9`.
+**Model check.** At boot (and on `ping`) every id is identified. A servo whose model differs from `config.h` is reported, still decoded as what it really is (so `monitor` and `limits` work), and its joint cannot be armed until `config.h` is fixed. `joints` marks it `SCS?` / `HLS?`.
 
-## Bring-up order after flashing M2
+## Bring-up of the rebuilt hand
 
-1. **Boot with the M1 settings in NVS.** Expect `migrated from version 1`. Joints 1–8 keep their calibration; run `save` to store the new format.
-2. **Joint 9 travel.** See above.
-3. **Servo angle limits.** Run `limits check`, then `limits write all`, then `limits check` again. Every defined joint should then read `ok`.
-4. **Speeds.**
-   - Run `sweep 1` first as a sanity check. It should come out close to servo_bringup's numbers: 411–548 steps/s in +, ~272 in −.
-   - Then sweep `3 4 5 7 9`.
-   - Run `sweep <j> apply` where a suggestion is printed, then `save`.
-5. **Calibrate.** Calibrate the remaining joints (see *Calibration*), enable them, then `save`.
-6. **Arm.** `arm`.
+Old calibrations are discarded at the first boot (`saved for the hand before the rebuild`). Run every step disarmed.
+
+1. **Models.** `ping`: ids 1, 3, 5 report SCS0009, the others HLS3606, no mismatch.
+2. **Travel.** `monitor on`, move each finger by hand to both mechanical ends and note the servo column. An HLS3606 still in factory multi-turn mode may show negative or > 4095 readings; note them anyway.
+3. **`config.h`.** For each joint enter a name and the travel: `min + 15` / `max − 15` for SCS0009, `min + 50` / `max − 50` for HLS3606. Reflash.
+4. **Angle limits.** `limits check`, then `limits write all`. HLS3606 servos are unlocked at register 55, written and locked again. **Power-cycle the servos**, then `limits check`: every joint `ok`.
+   - An HLS joint whose travel crosses the encoder zero cannot be expressed by limits: set a position offset with DEX_hand_software's `hls-setup` first (not implemented here).
+5. **Speeds.** `sweep <j>` for each joint, `sweep <j> apply` where a suggestion is printed.
+6. **Calibrate** (see *Calibration*); joint 9 needs `home 9` if it stays multi-turn. Optionally `set <j> ilimit <mA>` for HLS joints.
+7. **`save`**, then `arm` one joint at a time, then the whole hand.
 
 ## Calibration
 
@@ -114,13 +125,13 @@ This ports servo_bringup's verify-motion speed sweep to the firmware.
 
 **What it does.**
 - Arms the joint alone; every other joint must be off.
-- Moves the joint to the low end of its range: the calibrated servo endpoints, or the travel, minus 10 steps each side.
-- Makes single-goal moves low → high → low at speed registers 100, 300, 600 and 1000.
+- Moves the joint to the low end of its range: the calibrated servo endpoints, or the travel, minus 10 SCS steps (33 HLS steps) each side.
+- Makes single-goal moves low → high → low at four speed tiers: 100, 300, 600, 1000 steps/s on an SCS0009, 333, 1000, 2000, 3333 on an HLS3606.
 - Reports each move's speed, whether it arrived, and its peak load.
 
 **Results.**
 - Saturation per direction is the fastest move that arrived.
-- A direction that never arrives at register ≥ 300 is **force-limited**: friction or tendon preload. It gets no suggestion; fix the mechanics and sweep again.
+- A direction that never arrives from the second tier on is **force-limited**: friction or tendon preload. It gets no suggestion; fix the mechanics and sweep again.
 - A move is shown as `skipped` when the previous move never came back far enough to start a full move. This happens with a stuck direction.
 
 **Suggestions.** `vmax = 1.2 × faster`, `vsat = 0.9 × slower`. `sweep <j> apply` writes them through the normal `set` checks; they stay in RAM until `save`.
@@ -132,6 +143,8 @@ This ports servo_bringup's verify-motion speed sweep to the firmware.
 ## Grasping
 
 The SCS0009's torque ceiling (register 16) is already at its factory maximum of 100 %. What used to stop a grasp were the firmware's own checks.
+
+**HLS3606 current.** Every goal carries the joint's goal current (`min(protection, ilimit)`), so the squeeze is limited by current, not by the load percentage alone. The firmware trips `over-current` on that joint alone when |current| ≥ 0.9 × the cap for 0.2 s (as DEX_hand_software does). Lower `ilimit` for a gentler grasp; `status` shows the present current.
 
 **`loadtrip` (default off).** When off, the firmware load trips (75 % / 0.3 s, 80 % / 0.1 s) never fire. A joint is released only when the servo itself reports overload or over-current, i.e. its own protection (80 % for 1 s) gave up; the disarm message says so. That joint alone goes off. `set loadtrip on` restores the M1 behaviour.
 
@@ -154,12 +167,12 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 | Command | Effect |
 |---|---|
 | `help` | List commands |
-| `status` | Armed count, last hand-level fault, one line per enabled or armed joint, global parameters. Each joint line shows state, exo, target, goal, sent goal, grip lead (`*` = contact), and servo position, torque, load, voltage and temperature |
-| `joints` | All 9 joints: enabled, encoder, exo span, servo endpoints, travel, `vmax`/`amax`/`vsat`/`trk`, ready, state, last fault |
+| `status` | Armed count, last hand-level fault, one line per enabled or armed joint, global parameters. Each joint line shows state, exo, target, goal, sent goal, grip lead (`*` = contact), commanded speed (steps/s), and servo position, torque, load, current (HLS), voltage and temperature |
+| `joints` | All 9 joints: model (`?` = not identified / mismatch), enabled, encoder, exo span, servo endpoints, travel, `vmax`/`amax`/`vsat`/`trk`, `ilimit` (`prot` = protection current), ready, state, last fault |
 | `enc` | All encoder channels with state, AGC, magnet flags, errors and the joint each one drives |
 | `stats [reset]` | Loop jitter (max, p99), execution time, servo bus and encoder statistics, jump-guard rejections |
 | `monitor on\|off` | 10 Hz rows: 9 encoder angles and 9 servo positions, polling one servo per cycle. Disarmed only |
-| `ping` | Scan the hand servos and check the model number. Disarmed only |
+| `ping` | Identify every hand servo (model, firmware) and compare with `config.h`. Disarmed only |
 | `arm` | Torque on for every enabled joint not yet armed. All must be ready |
 | `arm <j>` | Torque on for one joint while others follow, e.g. after it was isolated by a fault |
 | `disarm` / `disarm <j>` / `x` | Torque off: all joints / one joint / E-stop on every servo. BOOT does the same as `x` |
@@ -167,13 +180,14 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 | `cal <j> a\|b` / `cal <j> hand a\|b` | Capture the exo endpoint / the servo endpoint (move the finger by hand). Disarmed only |
 | `home <j>` | Multi-turn joint: the glove is at pose A, fix the turn count. Only that joint must be disarmed |
 | `set <j> exospan <rawA> <span>` / `set <j> servo <a> <b>` | Enter endpoints directly (the `dump` format; span in counts, multi-turn allowed). The old `set <j> exo <rawA> <rawB>` from earlier dumps still works for spans below half a turn |
-| `set <j> vmax\|amax\|vsat\|trk\|grip <n>` | Per-joint motion, tracking and grip parameters. Allowed while armed |
+| `set <j> vmax\|amax\|vsat\|trk\|grip <n>` | Per-joint motion, tracking and grip parameters, in the servo's own steps. Allowed while armed |
+| `set <j> ilimit <mA>` | HLS goal-current cap, 0 = protection current. Allowed while armed (applied at once) |
 | `set lead\|mincut\|beta\|jump\|gripload <v>` | Global parameters. Allowed while armed |
 | `set loadtrip on\|off` | Firmware load trips (off = only the servo's overload protection decides) |
 | `sweep <j>` / `sweep <j> apply` | Measure speed and suggest `vmax`/`vsat` / apply the suggestion. `sweep <j>` is disarmed only |
-| `limits check` / `limits write <j\|all>` | Compare / sync the servos' angle-limit registers with the travel. Writes only differing values. Disarmed only |
+| `limits check` / `limits write <j\|all>` | Compare / sync the servos' angle-limit registers with the travel. Writes only differing values; power-cycle HLS servos afterwards. Disarmed only |
 | `save` / `load` / `defaults` / `dump` | Write NVS / reload / reset to defaults in RAM / print as commands |
-| `plot <j> on` / `plot off` | Teleplot at 50 Hz: `exo_deg exo_filt_deg target goal sent ref grip_lead present load speed_reg` |
+| `plot <j> on` / `plot off` | Teleplot at 50 Hz: `exo_deg exo_filt_deg target goal sent ref grip_lead present load speed_cmd`, plus `current_ma` on HLS joints |
 
 ## Behaviour
 
@@ -181,7 +195,7 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 
 | State | Behaviour |
 |---|---|
-| ALIGN | Moves to the mapped target at 50 steps/s, then reports `aligned -> FOLLOW` |
+| ALIGN | Moves to the mapped target at 50 SCS steps/s (167 HLS), then reports `aligned -> FOLLOW` |
 | FOLLOW | Follows the glove |
 | HOLD | Entered on encoder loss (3 cycles); freezes the joint. If the encoder is healthy again for 200 ms, the joint re-aligns; after 3 s it is switched off |
 
@@ -189,7 +203,7 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 
 | Scope | Faults | Action |
 |---|---|---|
-| Joint | Load trip (only when `loadtrip on`), overheat, tracking lag, servo error (overload, over-current, angle sensor), encoder lost > 3 s | Only that joint goes off. `joints` shows why; `arm <j>` brings it back |
+| Joint | Load trip (only when `loadtrip on`), overheat, over-current (HLS), tracking lag, servo error (overload, over-current, angle sensor), encoder lost > 3 s | Only that joint goes off. `joints` shows why; `arm <j>` brings it back |
 | Hand | Supply voltage, servo voltage error, torque mismatch, comm lost (3 failed reads or no good read for 100 ms), E-stop | Every servo goes off |
 
 **Servo reads.**
@@ -198,24 +212,36 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 - All goals go out in one SYNC_WRITE.
 - Arming 9 joints at once takes about 22 ms, which counts one overrun in `stats`.
 
-**Arming sequence, per joint.** These rules are measured SCS0009 behaviour, from servo_bringup:
-1. Read the servo state: no error, position inside travel.
-2. Write goal = present position at speed 50.
-3. Write torque on.
-4. Read back: torque on, goal = hold position, movement ≤ 5 steps.
+**Arming sequence, per joint.** Measured SCS0009 behaviour from servo_bringup, plus DEX_hand_software's HLS3606 checks:
+1. The servo was identified as the model in `config.h`.
+2. Read the servo state: no error, position inside travel.
+3. HLS3606 only: angle limits not 0/0 and covering the travel, resolution (register 30) = 1, position mode (register 33) = 0, protection current (register 28) 1–2047, position not negative. Then set the goal current.
+4. Write goal = present position at the arm speed.
+5. Write torque on.
+6. Read back: torque on, goal = hold position, movement ≤ 5 SCS steps (17 HLS).
+
+The goal is written before torque on, which is safe whether or not an HLS3606 goal write switches torque on by itself (DEX_hand_software's measurements disagree).
 
 **Other rules:**
-- The speed register is never 0 (0 means maximum speed).
-- The goal time is always 0.
-- Torque-off is broadcast to all 9 servos at boot and on E-stop: SCS0009 has no communication watchdog.
+- Speeds are steps/s at every interface; the bus converts them to each model's speed register. An SCS0009 register is never 0 (full speed); an HLS3606 register is at least 1 (0 stops it) and at most 250.
+- The SCS0009 goal time is always 0.
+- Torque-off is broadcast to all 9 servos at boot and on E-stop: the servos have no communication watchdog.
 - `save`, `limits` and `sweep` are refused while any joint is armed.
 
-**NVS.** Format version 3 is 231 bytes and holds 9 joints, the grip fields and a 32-bit exo span.
-- Versions 2 (M2) and 1 (M1, 8 joints) migrate on load; run `save` afterwards.
+**NVS.** Format version 4 is 258 bytes and holds, per joint, the servo model and `ilimit` besides the M2 fields.
+- Versions 1–3 were saved for the hand before the rebuild (other ids and servos) and are discarded.
 - Missing, corrupt or unknown-version data is rejected, and defaults are used.
-- Data saved for another servo series keeps the exo calibration but clears the servo endpoints.
+- A joint whose stored model differs from `config.h` is reset to its defaults; the other joints keep their settings.
 
-## M2 bench test
+## Rebuilt-hand bench test
+
+1. **Models.** `ping` matches `config.h`. Change one id's model in `config.h` on purpose: boot reports the mismatch and `arm <j>` is refused.
+2. **HLS limits.** `arm <j>` on an HLS joint with 0/0 limits is refused with the reason. After `limits write <j>` and a power-cycle, `limits check` shows `ok`.
+3. **Follow.** After bring-up, arm each joint alone, then the whole hand. `stats`: jitter max < 0.5 ms; `|pos − sent|` normal.
+4. **Current.** `set <j> ilimit 500` on an HLS joint and squeeze a sponge: `status` shows the current settling near 500 mA. Block the finger with a higher `ilimit`: `over-current` switches off that joint only.
+5. **SCS regression.** Joints 1, 3, 5 follow, grasp and stop on E-stop as before.
+
+## M2 bench test (previous hand)
 
 1. **Migration.** Covered by bring-up steps 1–3 above.
 2. **Sweeps.**
@@ -285,16 +311,16 @@ Thresholds are options (`--offset-deg`, `--nonlinear-deg`, …).
 ## Layout
 
 ```
-include/config.h          pins, bus, joint table (travel, vmax/vsat/amax), global defaults, timing
+include/config.h          pins, bus, joint table (model, travel, vmax/vsat/amax), global defaults, timing
 lib/AS5048B/              encoder driver (vendored, see below)
-lib/FeetechProtocol/      pure C++ packet codec (host-tested)
-lib/FeetechBus/           UART transport, ServoBus interface (incl. angle limits), ScsBus backend
+lib/FeetechProtocol/      pure C++ packet codec and SCS0009 / HLS3606 model codecs (host-tested)
+lib/FeetechBus/           UART transport, ServoBus interface, FeetechMixedBus (per-id models)
 lib/TeleopCore/           pure C++, host-tested:
   joint_map / joint_config  mapping, per-joint settings, validation
-  config_blob               NVS serialization (CRC32, version 3, v1/v2 migration, servo series)
+  config_blob               NVS serialization (CRC32, version 4, per-joint model)
   exo_tracker               continuous multi-turn exo position, auto-resolve / homing
   command_parser            console grammar, settings edits, dump format
-  supervisor                per-joint checks, fault scope
+  supervisor                per-joint checks (incl. HLS over-current), fault scope
   grip_limiter              load-adaptive goal lead cap
   speed_sweep               saturation speed measurement
   jump_guard / one_euro / rate_limiter
@@ -302,7 +328,7 @@ src/control_task.*        100 Hz loop on core 1: per-joint states, reads, arming
 src/config_store.*        Preferences (NVS) read/write
 src/console.*             USB console on core 0
 src/main.cpp              setup and task start
-test/                     Unity tests (native): packet, core, config, sweep, tracker
+test/                     Unity tests (native): packet, models, core, config, sweep, tracker
 tools/measure_mapping.py  mapping consistency measurement (host Python)
 ```
 
