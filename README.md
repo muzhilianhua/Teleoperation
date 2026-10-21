@@ -240,6 +240,48 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
    - `home 9` with the glove near B must be refused.
    - Unplug and replug encoder 0x40: joint 9 goes to HOLD, then off after 3 s with a request to `home` it.
 
+## Mapping measurement (`tools/measure_mapping.py`)
+
+Measures how well the two-point mapping makes the robot follow the glove, and which change the data points to (session zero, a 3-point mapping, angle mapping, or none). It needs only the standard library; plots need matplotlib, which `uv run` installs.
+
+**1. Record.** Log the serial output:
+
+```bash
+~/.platformio/penv/bin/pio device monitor | tee measure.log
+```
+
+Per round, hold each glove pose still for 2 s and type `status`:
+- closing: A, 25 %, 50 %, 75 %, B;
+- then opening: B, 75 %, 50 %, 25 %, A.
+
+Take the glove off and on between rounds; 2–3 rounds is enough.
+
+**2. Extract.** This writes one row per snapshot and joint, with round, direction and pose pre-filled for that protocol. Fix them if you typed an extra `status`.
+
+```bash
+uv run tools/measure_mapping.py extract measure.log --joints 1 6 9 -o poses.csv
+```
+
+**3. Fill in** `theta_h` (human joint angle from the jig) and `theta_r` (measured robot joint angle), in degrees.
+- With `theta_h` empty, the exoskeleton encoder angle is used instead.
+- With `theta_r` empty and `--theta-r-from-pos 0.293`, the servo position is used. This is valid for direct-drive joints only.
+
+**4. Analyze.**
+
+```bash
+uv run tools/measure_mapping.py analyze poses.csv --plot plots/
+```
+
+| Reported | Meaning | Points to |
+|---|---|---|
+| `\|pos-sent\|` > 10 steps | The servo did not follow its own goal | Fix the servo side first; the rest is polluted |
+| Offset spread > 3° | Re-donning shifts the mapping between rounds | Session zero |
+| Non-linearity > 5° | Largest pose-mean deviation from each round's A–B line, i.e. what the firmware's linear mapping gets wrong mid-range | 3-point / piecewise mapping |
+| Slope vs `--expected-gain` | Proportional, not equal-angle | Angle mapping |
+| Hysteresis > 3° | Closing vs opening at the same pose | Backlash: not fixed by any calibration |
+
+Thresholds are options (`--offset-deg`, `--nonlinear-deg`, …).
+
 ## Layout
 
 ```
@@ -261,6 +303,7 @@ src/config_store.*        Preferences (NVS) read/write
 src/console.*             USB console on core 0
 src/main.cpp              setup and task start
 test/                     Unity tests (native): packet, core, config, sweep, tracker
+tools/measure_mapping.py  mapping consistency measurement (host Python)
 ```
 
 ## Vendored code

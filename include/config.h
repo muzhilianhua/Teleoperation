@@ -69,9 +69,9 @@ inline constexpr teleop::JointDefaults kJoints[teleop::kMaxJoints] = {
     {4, "index_dip",       250, 590, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
     {5, "index_mcp",       420, 600, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
     {6, "thumb_mcp_rot",   300, 700, 690, 365, kAcceleration, teleop::kNoEncoder, false},
-    {7, "thumb_mcp",       650, 900, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
+    {7, "thumb_mcp",       400, 920, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
     {8, "thumb_ip",         20, 280, 380, 230, kAcceleration, teleop::kNoEncoder, false},
-    {9, "joint9",          480, 950, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
+    {9, "joint9",            0, 730, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
 };
 constexpr teleop::ServoBackend kServoBackend = teleop::ServoBackend::Scs;
 
