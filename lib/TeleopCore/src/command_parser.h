@@ -56,6 +56,7 @@ enum class SetKey : uint8_t {
   VSat,
   Track,
   Grip,
+  CurrentLimit,  // HLS goal current cap in mA, 0 = servo protection current
   Lead,       // global
   MinCutoff,  // global
   Beta,       // global

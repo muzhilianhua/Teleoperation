@@ -915,7 +915,7 @@ void TeleopController::saveConfig() {
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) joints[i] = channels_[i].settings;
   uint8_t blob[teleop::kBlobSize];
   const size_t n =
-      teleop::packConfig(joints, teleop::kMaxJoints, global_, config::kServoBackend, blob, sizeof(blob));
+      teleop::packConfig(joints, config::kJoints, teleop::kMaxJoints, global_, blob, sizeof(blob));
   const bool ok = n > 0 && config_store::save(blob, n);
   message(ok ? "configuration saved to NVS" : "SAVE FAILED");
 }
@@ -931,7 +931,7 @@ bool TeleopController::loadConfig(bool atBoot) {
   teleop::GlobalSettings global;
   uint8_t badJoint = 0xFF;
   const teleop::BlobStatus status = teleop::unpackConfig(
-      blob, length, config::kServoBackend, config::kJoints, teleop::kMaxJoints, config::kEncoderCount,
+      blob, length, config::kJoints, teleop::kMaxJoints, config::kEncoderCount,
       config::kGlobalDefaults, joints, global, &badJoint);
   if (!teleop::blobApplied(status)) {
     message("stored configuration rejected (%s), %s", teleop::blobStatusToString(status),

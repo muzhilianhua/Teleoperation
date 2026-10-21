@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <servo_models.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -18,9 +19,12 @@ constexpr uint8_t kNoEncoder = 0xFF;
 constexpr int32_t kMinExoSpanCounts = 182;  // 4 deg
 constexpr int32_t kMaxExoSpanCounts = 3 * kEncoderCounts;  // 3 encoder turns
 
+// Every position, speed and step tolerance of a joint is in its servo's own
+// steps (SCS0009 ~0.293 deg, HLS3606 ~0.088 deg per step).
 struct JointDefaults {
   uint8_t servoId;
   const char* name;
+  feetech::ServoModel model;
   int16_t travelMin;
   int16_t travelMax;
   uint16_t vmax;  // steps/s, rate-limiter ceiling
@@ -47,7 +51,13 @@ struct JointSettings {
   // Grip limiter: largest lead of the goal over the measured position, in
   // steps. Contact shrinks it to hold the squeeze near gripLoadPct. 0 = off.
   uint16_t gripSteps = 60;
+  // HLS3606 only: goal current cap in mA sent with every goal (the servo
+  // limits its torque to it). 0 = the servo's own protection current.
+  uint16_t currentLimitMa = 0;
 };
+
+constexpr uint16_t kMinCurrentLimitMa = 7;      // 1 unit of 6.5 mA
+constexpr uint16_t kMaxCurrentLimitMa = 13306;  // 2047 units
 
 struct GlobalSettings {
   float leadMs = 0.0f;
@@ -61,6 +71,11 @@ struct GlobalSettings {
 };
 
 JointSettings defaultSettings(const JointDefaults& defaults);
+
+// Native steps per SCS0009 step, to express SCS-calibrated tolerances
+// (tracking 40 steps, grip lead 60 steps, ...) in a joint's own steps.
+inline float stepScale(const JointDefaults& d) { return feetech::modelInfo(d.model).stepScale; }
+inline float scaledSteps(const JointDefaults& d, float scsSteps) { return scsSteps * stepScale(d); }
 
 // Travel min >= max marks a joint whose limits have not been measured yet.
 inline bool travelDefined(const JointDefaults& d) { return d.travelMin < d.travelMax; }

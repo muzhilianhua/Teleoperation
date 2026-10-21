@@ -46,34 +46,34 @@ constexpr uint8_t kControlCore = 1;
 constexpr uint8_t kConsoleCore = 0;
 
 // ---- Joint table: one entry per hand servo --------------------------------
-// Travel limits: [bringup] JOINTS (config.py:61-71). They can only be changed
-// here, never from the console.
-// vmax ~ 1.2 x the faster-direction saturation speed and vsat ~ 0.9 x the
-// slower-direction one, from [bringup] reports/verify_motion_*.json speed
-// sweeps. Joints 3/4/5/7 are force-limited (friction / tendon preload, 2-10
-// steps/s): their values are placeholders until the mechanics are fixed, and
-// their tracking check will trip until then.
-// Joint 9 was added after servo_bringup; travel 0/0 means "not defined": the
-// joint can be monitored but not enabled, calibrated, swept or armed until
-// its travel is measured (monitor, move by hand, ~15 steps margin) and
-// entered here. Its name is a placeholder too.
+// The rebuilt hand mixes SCS0009 (ids 1, 3, 5) and HLS3606 (ids 2, 4, 6-9) on
+// the same bus, per the 2026-10-21 bus scan; boot identifies every servo and
+// refuses to arm a joint whose model differs from this table.
+// Everything per joint is in its servo's own steps: SCS0009 ~0.293 deg,
+// HLS3606 ~0.088 deg (x3.333). Names are placeholders and travel 0/0 means
+// "not defined" (monitor only) until measured on the bench: torque off,
+// `monitor on`, move by hand to both ends, keep ~15 SCS / ~50 HLS steps of
+// margin. An HLS3606 also needs single-turn angle limits written
+// (`limits write <j>`, then power-cycle the servos) before it can be armed.
+// vmax / vsat / amax are placeholders scaled from the SCS values: measure them
+// with `sweep <j>` and `sweep <j> apply`.
 // Encoder assignment and enable flags below are only boot defaults; the
 // operator sets them with `set <j> enc/on` and stores them in NVS.
 // All servos on the bus get torque-off at boot and on E-stop.
-constexpr uint16_t kAcceleration = 8000;  // steps/s^2
+constexpr feetech::ServoModel kScs = feetech::ServoModel::Scs0009;
+constexpr feetech::ServoModel kHls = feetech::ServoModel::Hls3606;
 inline constexpr teleop::JointDefaults kJoints[teleop::kMaxJoints] = {
-    // id  name             min  max  vmax vsat amax           encoder            enabled
-    {1, "triple_pip",      350, 730, 660, 245, kAcceleration, 5,                 true},
-    {2, "triple_dip",      600, 890, 660, 370, kAcceleration, teleop::kNoEncoder, false},
-    {3, "index_pip",       230, 630, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
-    {4, "index_dip",       250, 590, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
-    {5, "index_mcp",       420, 600, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
-    {6, "thumb_mcp_rot",   300, 700, 690, 365, kAcceleration, teleop::kNoEncoder, false},
-    {7, "thumb_mcp",       400, 920, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
-    {8, "thumb_ip",         20, 280, 380, 230, kAcceleration, teleop::kNoEncoder, false},
-    {9, "joint9",            0, 730, 400, 50,  kAcceleration, teleop::kNoEncoder, false},
+    // id  name   model min max  vmax  vsat  amax   encoder            enabled
+    {1, "id1",  kScs,  0,  0,   400,  50,   8000,  teleop::kNoEncoder, false},
+    {2, "id2",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {3, "id3",  kScs,  0,  0,   400,  50,   8000,  teleop::kNoEncoder, false},
+    {4, "id4",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {5, "id5",  kScs,  0,  0,   400,  50,   8000,  teleop::kNoEncoder, false},
+    {6, "id6",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {7, "id7",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {8, "id8",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {9, "id9",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
 };
-constexpr teleop::ServoBackend kServoBackend = teleop::ServoBackend::Scs;
 
 // ---- Global defaults (runtime-adjustable with `set`, stored in NVS) -------
 inline constexpr teleop::GlobalSettings kGlobalDefaults = {

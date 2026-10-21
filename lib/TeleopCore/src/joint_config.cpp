@@ -1,5 +1,6 @@
 #include "joint_config.h"
 
+#include <math.h>
 #include <stdlib.h>
 
 namespace teleop {
@@ -21,8 +22,9 @@ JointSettings defaultSettings(const JointDefaults& d) {
   s.vmax = d.vmax;
   s.amax = d.amax;
   s.vsat = d.vsat;
-  s.trackSteps = 40;
-  s.gripSteps = 60;
+  s.trackSteps = static_cast<uint16_t>(lroundf(scaledSteps(d, 40.0f)));
+  s.gripSteps = static_cast<uint16_t>(lroundf(scaledSteps(d, 60.0f)));
+  s.currentLimitMa = 0;
   return s;
 }
 
@@ -43,11 +45,19 @@ const char* validateJoint(const JointSettings& s, const JointDefaults& d, uint8_
   if (s.exoB != 0 && labs(s.exoB) < kMinExoSpanCounts) return "exo span below 4 deg";
   if (labs(s.exoB) > kMaxExoSpanCounts) return "exo span above 3 encoder turns";
   if (s.servoA != s.servoB && !servoCalibrated(s, d)) return "servo endpoint outside travel";
-  if (!inRange(s.vmax, 1, 1000)) return "vmax outside 1..1000";
-  if (!inRange(s.vsat, 1, 1000)) return "vsat outside 1..1000";
-  if (!inRange(s.amax, 10, 20000)) return "amax outside 10..20000";
-  if (!inRange(s.trackSteps, 5, 1000)) return "trk outside 5..1000";
-  if (s.gripSteps > 400) return "grip outside 0..400";
+  // Bounds follow the servo model: its fastest speed register and its step size.
+  const feetech::ModelInfo& m = feetech::modelInfo(d.model);
+  const int32_t maxSpeed = static_cast<int32_t>(m.maxSpeedRegister * m.stepsPerSpeedUnit);
+  const float scale = stepScale(d);
+  if (!inRange(s.vmax, 1, maxSpeed)) return "vmax outside 1..max speed of the servo model";
+  if (!inRange(s.vsat, 1, maxSpeed)) return "vsat outside 1..max speed of the servo model";
+  if (!inRange(s.amax, 10, lroundf(fminf(20000.0f * scale, 65000.0f)))) return "amax outside 10..20000 SCS steps/s^2";
+  if (!inRange(s.trackSteps, 5, lroundf(1000.0f * scale))) return "trk outside 5..1000 SCS steps";
+  if (s.gripSteps > lroundf(400.0f * scale)) return "grip outside 0..400 SCS steps";
+  if (s.currentLimitMa != 0) {
+    if (d.model != feetech::ServoModel::Hls3606) return "ilimit applies to HLS3606 joints only";
+    if (!inRange(s.currentLimitMa, kMinCurrentLimitMa, kMaxCurrentLimitMa)) return "ilimit outside 7..13306 mA";
+  }
   return nullptr;
 }
 

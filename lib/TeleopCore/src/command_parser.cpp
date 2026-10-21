@@ -95,7 +95,8 @@ constexpr KeyName kJointNumberKeys[] = {{"vmax", SetKey::VMax},
                                         {"amax", SetKey::AMax},
                                         {"vsat", SetKey::VSat},
                                         {"trk", SetKey::Track},
-                                        {"grip", SetKey::Grip}};
+                                        {"grip", SetKey::Grip},
+                                        {"ilimit", SetKey::CurrentLimit}};
 
 const char* parseSet(const Tokens& tk, ParsedCommand& out) {
   out.verb = Verb::Set;
@@ -168,14 +169,14 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     if (!eq(key, k.name)) continue;
     long v = 0;
     if (tk.n != 4 || !parseInt(tk.t[3], 0, 65535, v)) {
-      return "usage: set <joint> <vmax|amax|vsat|trk|grip> <integer>";
+      return "usage: set <joint> <vmax|amax|vsat|trk|grip|ilimit> <integer>";
     }
     out.key = k.key;
     out.values[0] = static_cast<float>(v);
     out.valueCount = 1;
     return nullptr;
   }
-  return "unknown key (on off enc exo exospan servo vmax amax vsat trk grip | lead mincut beta jump gripload loadtrip)";
+  return "unknown key (on off enc exo exospan servo vmax amax vsat trk grip ilimit | lead mincut beta jump gripload loadtrip)";
 }
 
 struct Simple {
@@ -412,6 +413,7 @@ const char* applySetting(const ParsedCommand& c, JointSettings* joints, const Jo
     case SetKey::VSat: s.vsat = static_cast<uint16_t>(v0); break;
     case SetKey::Track: s.trackSteps = static_cast<uint16_t>(v0); break;
     case SetKey::Grip: s.gripSteps = static_cast<uint16_t>(v0); break;
+    case SetKey::CurrentLimit: s.currentLimitMa = static_cast<uint16_t>(v0); break;
     default: return "unknown key";
   }
   const char* error = validateJoint(s, defaults[index], encoderCount);
@@ -436,6 +438,7 @@ size_t formatDump(const JointSettings* joints, const JointDefaults* defaults, ui
     if (servoCalibrated(s, d)) a.add("set %u servo %d %d\n", d.servoId, s.servoA, s.servoB);
     a.add("set %u vmax %u\nset %u amax %u\nset %u vsat %u\nset %u trk %u\nset %u grip %u\n", d.servoId,
           s.vmax, d.servoId, s.amax, d.servoId, s.vsat, d.servoId, s.trackSteps, d.servoId, s.gripSteps);
+    if (d.model == feetech::ServoModel::Hls3606) a.add("set %u ilimit %u\n", d.servoId, s.currentLimitMa);
     a.add("set %u %s\n", d.servoId, s.enabled ? "on" : "off");
   }
   a.add("set lead %g\nset mincut %g\nset beta %g\nset jump %g\nset gripload %g\nset loadtrip %s\n",

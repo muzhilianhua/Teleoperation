@@ -10,59 +10,20 @@ namespace {
 
 constexpr uint8_t kEncoders = 9;
 
-const JointDefaults kDefaults[kMaxJoints] = {
-    {1, "triple_pip", 350, 730, 660, 245, 8000, 5, true},
-    {2, "triple_dip", 600, 890, 660, 370, 8000, kNoEncoder, false},
-    {3, "index_pip", 250, 600, 400, 50, 8000, kNoEncoder, false},
-    {4, "index_dip", 250, 590, 400, 50, 8000, kNoEncoder, false},
-    {5, "index_mcp", 435, 600, 400, 50, 8000, kNoEncoder, false},
-    {6, "thumb_mcp_rot", 300, 700, 690, 365, 8000, kNoEncoder, false},
-    {7, "thumb_mcp", 650, 900, 400, 50, 8000, kNoEncoder, false},
-    {8, "thumb_ip", 20, 280, 380, 230, 8000, kNoEncoder, false},
-    {9, "joint9", 0, 0, 400, 50, 8000, kNoEncoder, false},  // travel not measured yet
-};
+constexpr feetech::ServoModel kScs = feetech::ServoModel::Scs0009;
+constexpr feetech::ServoModel kHls = feetech::ServoModel::Hls3606;
 
-// Version 1 layout (8 joints), as written by the M1 firmware.
-size_t packV1(const JointSettings* joints, const GlobalSettings& g, uint8_t backend, uint8_t* out) {
-  size_t n = 0;
-  auto u8 = [&](uint8_t v) { out[n++] = v; };
-  auto u16 = [&](uint16_t v) {
-    u8(static_cast<uint8_t>(v & 0xFF));
-    u8(static_cast<uint8_t>(v >> 8));
-  };
-  auto u32 = [&](uint32_t v) {
-    u16(static_cast<uint16_t>(v & 0xFFFF));
-    u16(static_cast<uint16_t>(v >> 16));
-  };
-  auto f32 = [&](float v) {
-    uint32_t bits;
-    memcpy(&bits, &v, sizeof(bits));
-    u32(bits);
-  };
-  u32(kBlobMagic);
-  u16(1);
-  u8(backend);
-  u8(kV1JointCount);
-  for (uint8_t i = 0; i < kV1JointCount; ++i) {
-    const JointSettings& s = joints[i];
-    u8(s.enabled ? 1 : 0);
-    u8(s.encoderIndex);
-    u16(s.exoRef);
-    u16(static_cast<uint16_t>(s.exoB));
-    u16(static_cast<uint16_t>(s.servoA));
-    u16(static_cast<uint16_t>(s.servoB));
-    u16(s.vmax);
-    u16(s.amax);
-    u16(s.vsat);
-    u16(s.trackSteps);
-  }
-  f32(g.leadMs);
-  f32(g.minCutoffHz);
-  f32(g.beta);
-  f32(g.jumpDeg);
-  u32(crc32(out, n));
-  return n;
-}
+const JointDefaults kDefaults[kMaxJoints] = {
+    {1, "triple_pip", kScs, 350, 730, 660, 245, 8000, 5, true},
+    {2, "triple_dip", kHls, 600, 890, 660, 370, 8000, kNoEncoder, false},
+    {3, "index_pip", kScs, 250, 600, 400, 50, 8000, kNoEncoder, false},
+    {4, "index_dip", kScs, 250, 590, 400, 50, 8000, kNoEncoder, false},
+    {5, "index_mcp", kScs, 435, 600, 400, 50, 8000, kNoEncoder, false},
+    {6, "thumb_mcp_rot", kHls, 300, 2700, 1333, 167, 26666, kNoEncoder, false},
+    {7, "thumb_mcp", kScs, 650, 900, 400, 50, 8000, kNoEncoder, false},
+    {8, "thumb_ip", kScs, 20, 280, 380, 230, 8000, kNoEncoder, false},
+    {9, "joint9", kScs, 0, 0, 400, 50, 8000, kNoEncoder, false},  // travel not measured yet
+};
 
 void loadDefaults(JointSettings* joints) {
   for (uint8_t i = 0; i < kMaxJoints; ++i) joints[i] = defaultSettings(kDefaults[i]);
@@ -90,51 +51,6 @@ void configureSample(JointSettings* joints, GlobalSettings& g) {
   g.loadTripEnabled = true;
 }
 
-// Version 2 layout (9 joints, 16-bit exo span), as written by the M2 firmware.
-size_t packV2(const JointSettings* joints, const GlobalSettings& g, uint8_t backend, uint8_t* out) {
-  size_t n = 0;
-  auto u8 = [&](uint8_t v) { out[n++] = v; };
-  auto u16 = [&](uint16_t v) {
-    u8(static_cast<uint8_t>(v & 0xFF));
-    u8(static_cast<uint8_t>(v >> 8));
-  };
-  auto u32 = [&](uint32_t v) {
-    u16(static_cast<uint16_t>(v & 0xFFFF));
-    u16(static_cast<uint16_t>(v >> 16));
-  };
-  auto f32 = [&](float v) {
-    uint32_t bits;
-    memcpy(&bits, &v, sizeof(bits));
-    u32(bits);
-  };
-  u32(kBlobMagic);
-  u16(2);
-  u8(backend);
-  u8(kMaxJoints);
-  for (uint8_t i = 0; i < kMaxJoints; ++i) {
-    const JointSettings& s = joints[i];
-    u8(s.enabled ? 1 : 0);
-    u8(s.encoderIndex);
-    u16(s.exoRef);
-    u16(static_cast<uint16_t>(static_cast<int16_t>(s.exoB)));
-    u16(static_cast<uint16_t>(s.servoA));
-    u16(static_cast<uint16_t>(s.servoB));
-    u16(s.vmax);
-    u16(s.amax);
-    u16(s.vsat);
-    u16(s.trackSteps);
-    u16(s.gripSteps);
-  }
-  f32(g.leadMs);
-  f32(g.minCutoffHz);
-  f32(g.beta);
-  f32(g.jumpDeg);
-  f32(g.gripLoadPct);
-  u8(g.loadTripEnabled ? 1 : 0);
-  u32(crc32(out, n));
-  return n;
-}
-
 void assertJointsEqual(const JointSettings& a, const JointSettings& b) {
   TEST_ASSERT_EQUAL(a.enabled, b.enabled);
   TEST_ASSERT_EQUAL(a.encoderIndex, b.encoderIndex);
@@ -147,6 +63,7 @@ void assertJointsEqual(const JointSettings& a, const JointSettings& b) {
   TEST_ASSERT_EQUAL(a.vsat, b.vsat);
   TEST_ASSERT_EQUAL(a.trackSteps, b.trackSteps);
   TEST_ASSERT_EQUAL(a.gripSteps, b.gripSteps);
+  TEST_ASSERT_EQUAL(a.currentLimitMa, b.currentLimitMa);
 }
 
 }  // namespace
@@ -217,12 +134,12 @@ void test_blob_round_trip() {
   GlobalSettings g;
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
-  TEST_ASSERT_EQUAL(kBlobSize, packConfig(joints, kMaxJoints, g, ServoBackend::Scs, blob, sizeof(blob)));
-  TEST_ASSERT_EQUAL(231, kBlobSize);
+  TEST_ASSERT_EQUAL(kBlobSize, packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob)));
+  TEST_ASSERT_EQUAL(258, kBlobSize);
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
-  TEST_ASSERT_EQUAL(BlobStatus::Ok, unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults,
+  TEST_ASSERT_EQUAL(BlobStatus::Ok, unpackConfig(blob, sizeof(blob), kDefaults,
                                                  kMaxJoints, kEncoders, GlobalSettings(), loaded, lg));
   for (uint8_t i = 0; i < kMaxJoints; ++i) assertJointsEqual(joints[i], loaded[i]);
   TEST_ASSERT_EQUAL_FLOAT(80.0f, lg.leadMs);
@@ -237,7 +154,7 @@ void test_blob_rejects_corruption_without_touching_output() {
   GlobalSettings g;
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
-  packConfig(joints, kMaxJoints, g, ServoBackend::Scs, blob, sizeof(blob));
+  packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob));
 
   JointSettings out[kMaxJoints];
   loadDefaults(out);
@@ -246,35 +163,20 @@ void test_blob_rejects_corruption_without_touching_output() {
 
   memcpy(bad, blob, sizeof(bad));
   bad[20] ^= 0x01;
-  TEST_ASSERT_EQUAL(BlobStatus::BadCrc, unpackConfig(bad, sizeof(bad), ServoBackend::Scs, kDefaults,
+  TEST_ASSERT_EQUAL(BlobStatus::BadCrc, unpackConfig(bad, sizeof(bad), kDefaults,
                                                      kMaxJoints, kEncoders, GlobalSettings(), out, og));
   TEST_ASSERT_EQUAL(0, out[0].exoB);  // untouched
 
-  TEST_ASSERT_EQUAL(BlobStatus::BadSize, unpackConfig(blob, 100, ServoBackend::Scs, kDefaults,
+  TEST_ASSERT_EQUAL(BlobStatus::BadSize, unpackConfig(blob, 100, kDefaults,
                                                       kMaxJoints, kEncoders, GlobalSettings(), out, og));
   memcpy(bad, blob, sizeof(bad));
   bad[0] = 'X';
-  TEST_ASSERT_EQUAL(BlobStatus::BadMagic, unpackConfig(bad, sizeof(bad), ServoBackend::Scs, kDefaults,
+  TEST_ASSERT_EQUAL(BlobStatus::BadMagic, unpackConfig(bad, sizeof(bad), kDefaults,
                                                        kMaxJoints, kEncoders, GlobalSettings(), out, og));
   memcpy(bad, blob, sizeof(bad));
   bad[4] = 9;  // version
-  TEST_ASSERT_EQUAL(BlobStatus::BadVersion, unpackConfig(bad, sizeof(bad), ServoBackend::Scs, kDefaults,
+  TEST_ASSERT_EQUAL(BlobStatus::BadVersion, unpackConfig(bad, sizeof(bad), kDefaults,
                                                          kMaxJoints, kEncoders, GlobalSettings(), out, og));
-}
-
-void test_blob_backend_mismatch_clears_servo_endpoints() {
-  JointSettings joints[kMaxJoints];
-  GlobalSettings g;
-  configureSample(joints, g);
-  uint8_t blob[kBlobSize];
-  packConfig(joints, kMaxJoints, g, ServoBackend::Scs, blob, sizeof(blob));
-  JointSettings out[kMaxJoints];
-  GlobalSettings og;
-  TEST_ASSERT_EQUAL(BlobStatus::BackendMismatch,
-                    unpackConfig(blob, sizeof(blob), ServoBackend::Hls, kDefaults, kMaxJoints,
-                                 kEncoders, GlobalSettings(), out, og));
-  TEST_ASSERT_FALSE(servoCalibrated(out[0], kDefaults[0]));
-  TEST_ASSERT_EQUAL(2100, out[0].exoB);  // operator calibration survives
 }
 
 void test_blob_invalid_joint_reset_to_defaults() {
@@ -283,46 +185,16 @@ void test_blob_invalid_joint_reset_to_defaults() {
   configureSample(joints, g);
   joints[1].servoA = 100;  // outside travel: packed anyway to simulate an old/broken record
   uint8_t blob[kBlobSize];
-  packConfig(joints, kMaxJoints, g, ServoBackend::Scs, blob, sizeof(blob));
+  packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob));
   JointSettings out[kMaxJoints];
   GlobalSettings og;
   uint8_t bad = 0xFF;
   TEST_ASSERT_EQUAL(BlobStatus::InvalidJoint,
-                    unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults, kMaxJoints,
+                    unpackConfig(blob, sizeof(blob), kDefaults, kMaxJoints,
                                  kEncoders, GlobalSettings(), out, og, &bad));
   TEST_ASSERT_EQUAL(1, bad);
   assertJointsEqual(defaultSettings(kDefaults[1]), out[1]);
   assertJointsEqual(joints[0], out[0]);
-}
-
-void test_blob_v3_keeps_multi_turn_span() {
-  JointSettings joints[kMaxJoints];
-  GlobalSettings g;
-  configureSample(joints, g);
-  joints[0].exoB = 24576;  // 1.5 encoder turns: does not fit 16 bits as before
-  uint8_t blob[kBlobSize];
-  packConfig(joints, kMaxJoints, g, ServoBackend::Scs, blob, sizeof(blob));
-  JointSettings out[kMaxJoints];
-  GlobalSettings og;
-  TEST_ASSERT_EQUAL(BlobStatus::Ok, unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults,
-                                                 kMaxJoints, kEncoders, GlobalSettings(), out, og));
-  TEST_ASSERT_EQUAL(24576, out[0].exoB);
-}
-
-void test_blob_v2_migrates() {
-  JointSettings joints[kMaxJoints];
-  GlobalSettings g;
-  configureSample(joints, g);
-  uint8_t blob[kV2BlobSize];
-  TEST_ASSERT_EQUAL(213, packV2(joints, g, static_cast<uint8_t>(ServoBackend::Scs), blob));
-  JointSettings out[kMaxJoints];
-  GlobalSettings og;
-  TEST_ASSERT_EQUAL(BlobStatus::Migrated, unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults,
-                                                       kMaxJoints, kEncoders, GlobalSettings(), out, og));
-  for (uint8_t i = 0; i < kMaxJoints; ++i) assertJointsEqual(joints[i], out[i]);
-  TEST_ASSERT_EQUAL(-1500, out[1].exoB);  // negative 16-bit span sign-extends
-  TEST_ASSERT_EQUAL_FLOAT(70.0f, og.gripLoadPct);
-  TEST_ASSERT_TRUE(og.loadTripEnabled);
 }
 
 void test_validate_span_limits() {
@@ -353,40 +225,95 @@ void test_exospan_and_legacy_exo_syntax() {
   TEST_ASSERT_EQUAL(2100, joints[0].exoB);
 }
 
-void test_blob_v1_migrates_and_keeps_calibration() {
-  JointSettings joints[kMaxJoints];
-  GlobalSettings g;
-  configureSample(joints, g);
-  uint8_t blob[kV1BlobSize];
-  TEST_ASSERT_EQUAL(172, packV1(joints, g, static_cast<uint8_t>(ServoBackend::Scs), blob));
-
-  JointSettings out[kMaxJoints];
-  GlobalSettings og;
-  TEST_ASSERT_EQUAL(BlobStatus::Migrated, unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults,
-                                                       kMaxJoints, kEncoders, GlobalSettings(), out, og));
-  TEST_ASSERT_TRUE(blobApplied(BlobStatus::Migrated));
-  for (uint8_t i = 0; i < kV1JointCount; ++i) {
-    JointSettings expected = joints[i];
-    expected.gripSteps = defaultSettings(kDefaults[i]).gripSteps;  // not stored by version 1
-    assertJointsEqual(expected, out[i]);
-  }
-  TEST_ASSERT_EQUAL_FLOAT(GlobalSettings().gripLoadPct, og.gripLoadPct);
-  TEST_ASSERT_FALSE(og.loadTripEnabled);
-  assertJointsEqual(defaultSettings(kDefaults[8]), out[8]);
-  TEST_ASSERT_EQUAL_FLOAT(80.0f, og.leadMs);
-}
-
-void test_blob_v1_with_wrong_size_rejected() {
+void test_blob_older_versions_superseded() {
   JointSettings joints[kMaxJoints];
   GlobalSettings g;
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
-  packV1(joints, g, static_cast<uint8_t>(ServoBackend::Scs), blob);
+  packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob));
+  JointSettings out[kMaxJoints];
+  loadDefaults(out);
+  GlobalSettings og;
+  for (uint8_t version = 1; version <= 3; ++version) {
+    blob[4] = version;  // the old hand's settings, whatever their size
+    TEST_ASSERT_EQUAL(BlobStatus::Superseded,
+                      unpackConfig(blob, version == 3 ? 231 : 172, kDefaults, kMaxJoints, kEncoders,
+                                   GlobalSettings(), out, og));
+  }
+  TEST_ASSERT_FALSE(blobApplied(BlobStatus::Superseded));
+  TEST_ASSERT_EQUAL(0, out[0].exoB);  // untouched
+}
+
+void test_blob_keeps_multi_turn_span_and_current_limit() {
+  JointSettings joints[kMaxJoints];
+  GlobalSettings g;
+  configureSample(joints, g);
+  joints[0].exoB = 24576;  // 1.5 encoder turns
+  joints[5].currentLimitMa = 500;
+  uint8_t blob[kBlobSize];
+  packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob));
   JointSettings out[kMaxJoints];
   GlobalSettings og;
-  // A v1 header with a v2-sized buffer must not be read past its CRC.
-  TEST_ASSERT_EQUAL(BlobStatus::BadSize, unpackConfig(blob, sizeof(blob), ServoBackend::Scs, kDefaults,
-                                                      kMaxJoints, kEncoders, GlobalSettings(), out, og));
+  TEST_ASSERT_EQUAL(BlobStatus::Ok, unpackConfig(blob, sizeof(blob), kDefaults, kMaxJoints, kEncoders,
+                                                 GlobalSettings(), out, og));
+  TEST_ASSERT_EQUAL(24576, out[0].exoB);
+  TEST_ASSERT_EQUAL(500, out[5].currentLimitMa);
+}
+
+void test_blob_changed_model_resets_that_joint() {
+  JointSettings joints[kMaxJoints];
+  GlobalSettings g;
+  configureSample(joints, g);
+  uint8_t blob[kBlobSize];
+  packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob));
+  JointDefaults changed[kMaxJoints];
+  for (uint8_t i = 0; i < kMaxJoints; ++i) changed[i] = kDefaults[i];
+  changed[0].model = kHls;  // joint 1 rebuilt with an HLS3606
+  JointSettings out[kMaxJoints];
+  GlobalSettings og;
+  uint8_t bad = 0xFF;
+  TEST_ASSERT_EQUAL(BlobStatus::InvalidJoint, unpackConfig(blob, sizeof(blob), changed, kMaxJoints, kEncoders,
+                                                           GlobalSettings(), out, og, &bad));
+  TEST_ASSERT_EQUAL(0, bad);
+  assertJointsEqual(defaultSettings(changed[0]), out[0]);
+  assertJointsEqual(joints[1], out[1]);  // other joints keep their calibration
+}
+
+void test_defaults_scale_with_servo_model() {
+  const JointSettings scs = defaultSettings(kDefaults[0]);
+  const JointSettings hls = defaultSettings(kDefaults[1]);
+  TEST_ASSERT_EQUAL(40, scs.trackSteps);
+  TEST_ASSERT_EQUAL(60, scs.gripSteps);
+  TEST_ASSERT_EQUAL(133, hls.trackSteps);  // same angle in 3.333x finer steps
+  TEST_ASSERT_EQUAL(200, hls.gripSteps);
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 3.333f, stepScale(kDefaults[1]));
+  TEST_ASSERT_NULL(validateJoint(hls, kDefaults[1], kEncoders));
+  JointSettings fast = defaultSettings(kDefaults[5]);
+  fast.vmax = 9000;  // fine for an HLS (max ~12490 steps/s), not for an SCS
+  TEST_ASSERT_NULL(validateJoint(fast, kDefaults[5], kEncoders));
+  JointSettings scsFast = defaultSettings(kDefaults[0]);
+  scsFast.vmax = 9000;
+  TEST_ASSERT_NOT_NULL(validateJoint(scsFast, kDefaults[0], kEncoders));
+}
+
+void test_current_limit_rules() {
+  JointSettings joints[kMaxJoints];
+  loadDefaults(joints);
+  GlobalSettings g;
+  ParsedCommand c;
+  TEST_ASSERT_NULL(parseCommand("set 2 ilimit 500", c));
+  TEST_ASSERT_EQUAL(SetKey::CurrentLimit, c.key);
+  TEST_ASSERT_FALSE(requiresDisarmed(c));  // adjustable while gripping
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL(500, joints[1].currentLimitMa);
+  parseCommand("set 2 ilimit 0", c);  // back to the servo's protection current
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 2 ilimit 5", c);  // below one 6.5 mA unit
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 2 ilimit 20000", c);
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 1 ilimit 500", c);  // SCS0009: no goal current
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
 }
 
 void test_undefined_travel_blocks_joint() {
@@ -574,6 +501,7 @@ void test_dump_round_trip() {
   configureSample(joints, g);
   joints[2].exoRef = 300;
   joints[2].exoB = 20000;  // 1.2 encoder turns: only exospan can carry it
+  joints[1].currentLimitMa = 650;  // HLS joint
   char text[3072];
   const size_t n = formatDump(joints, kDefaults, kMaxJoints, g, text, sizeof(text));
   TEST_ASSERT_TRUE(n > 0);
@@ -622,14 +550,14 @@ int main() {
   RUN_TEST(test_exo_raw_b_wraps);
   RUN_TEST(test_blob_round_trip);
   RUN_TEST(test_blob_rejects_corruption_without_touching_output);
-  RUN_TEST(test_blob_backend_mismatch_clears_servo_endpoints);
   RUN_TEST(test_blob_invalid_joint_reset_to_defaults);
-  RUN_TEST(test_blob_v3_keeps_multi_turn_span);
-  RUN_TEST(test_blob_v2_migrates);
   RUN_TEST(test_validate_span_limits);
   RUN_TEST(test_exospan_and_legacy_exo_syntax);
-  RUN_TEST(test_blob_v1_migrates_and_keeps_calibration);
-  RUN_TEST(test_blob_v1_with_wrong_size_rejected);
+  RUN_TEST(test_blob_older_versions_superseded);
+  RUN_TEST(test_blob_keeps_multi_turn_span_and_current_limit);
+  RUN_TEST(test_blob_changed_model_resets_that_joint);
+  RUN_TEST(test_defaults_scale_with_servo_model);
+  RUN_TEST(test_current_limit_rules);
   RUN_TEST(test_undefined_travel_blocks_joint);
   RUN_TEST(test_parse_basic_commands);
   RUN_TEST(test_parse_set_commands);
