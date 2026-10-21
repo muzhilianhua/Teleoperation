@@ -97,7 +97,23 @@ Run every step disarmed. Settings live in RAM until `save`.
    - closed → `cal 2 b`
 
    A ↔ A and B ↔ B sets the direction. Between `cal a` and `cal b`, move the joint continuously; the encoder may turn any number of times (up to 3). If tracking is interrupted (encoder dropout), `cal b` is refused; redo `cal a`.
-5. Check `joints` shows `ready yes`. Then `save`. Back up with `dump`: paste its output to restore.
+5. Check `joints` shows `ready yes`. Then `save`. Back up with `tools/calib.py backup` (see below), or copy the `dump` output: pasting it back, then `save`, restores everything.
+
+### Backup and restore (`tools/calib.py`)
+
+NVS keeps one set of settings per ESP32. To keep calibrations in files (per operator, in git) and move them between boards, use the host tool. Close `pio device monitor` first; the port is found automatically (or pass `--port`).
+
+```bash
+uv run tools/calib.py backup --tag woody --note "after rebuild"   # -> calib/<timestamp>_woody.txt
+uv run tools/calib.py diff calib/20261021-143005_woody.txt         # device RAM vs file
+uv run tools/calib.py restore calib/20261021-143005_woody.txt      # apply, verify, save
+```
+
+- A backup is the `dump` text plus a header, so it can also be pasted by hand.
+- `restore` refuses a file whose joint table (`# <id> <name>` lines, i.e. `config.h`) differs from the device's, unless `--force`.
+- It lists the changes and asks first (`-y` skips the question), then applies, dumps again to verify and runs `save`. `--no-save` stops after the verification.
+- Any rejected command (an armed joint, a value out of range) aborts the restore and sends `load`, so RAM falls back to what NVS holds.
+- Not stored anywhere by design: the turn count of multi-turn joints. `home <j>` is still needed after every power-up.
 
 ## Multi-turn joints and homing (`home <j>`)
 
@@ -330,6 +346,8 @@ src/console.*             USB console on core 0
 src/main.cpp              setup and task start
 test/                     Unity tests (native): packet, models, core, config, sweep, tracker
 tools/measure_mapping.py  mapping consistency measurement (host Python)
+tools/calib.py            calibration backup / diff / restore over the console
+calib/                    calibration backups written by tools/calib.py
 ```
 
 ## Vendored code
