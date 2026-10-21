@@ -4,21 +4,8 @@
 
 #pragma once
 
+#include <servo_models.h>  // ServoState
 #include <stdint.h>
-
-struct ServoState {
-  bool torqueOn = false;
-  int16_t goal = 0;
-  uint16_t goalSpeed = 0;
-  int16_t position = 0;
-  int16_t speed = 0;        // signed, steps/s
-  float loadPct = 0.0f;     // signed, percent of max torque
-  float voltage = 0.0f;     // volts
-  int16_t temperatureC = 0;
-  uint8_t status = 0;       // servo status register, 0 when healthy
-  bool moving = false;
-  uint8_t errorByte = 0;    // status-packet error byte
-};
 
 class ServoBus {
  public:
