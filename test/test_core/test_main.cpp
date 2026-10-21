@@ -276,6 +276,25 @@ void test_supervisor_contact_suspends_tracking() {
   TEST_ASSERT_EQUAL(Fault::TrackingError, sup.update(s, true, 700.0f, 650.0f, 1410));
 }
 
+void test_supervisor_over_current() {
+  JointSupervisor sup;
+  SupervisorConfig c;
+  c.currentTripMa = 0.9f * 500.0f;  // ilimit 500 mA
+  sup.setConfig(c);
+  ServoSample s = healthy(true);
+  s.hasCurrent = true;
+  s.currentMa = -460.0f;  // sign does not matter
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 500.0f, 0));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 500.0f, 190));
+  const Fault f = sup.update(s, true, 500.0f, 500.0f, 200);
+  TEST_ASSERT_EQUAL(Fault::OverCurrent, f);
+  TEST_ASSERT_EQUAL(FaultScope::Joint, faultScope(f));
+  sup.reset();
+  s.hasCurrent = false;  // an SCS0009 never trips on current
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 500.0f, 1000));
+  TEST_ASSERT_EQUAL(Fault::None, sup.update(s, true, 500.0f, 500.0f, 2000));
+}
+
 // ---- grip limiter ------------------------------------------------------------
 
 GripLimiter makeGrip() {
@@ -395,6 +414,7 @@ int main() {
   RUN_TEST(test_fault_scope);
   RUN_TEST(test_supervisor_load_trips_can_be_disabled);
   RUN_TEST(test_supervisor_contact_suspends_tracking);
+  RUN_TEST(test_supervisor_over_current);
   RUN_TEST(test_grip_free_motion_keeps_full_lead);
   RUN_TEST(test_grip_fast_but_loaded_is_not_contact);
   RUN_TEST(test_grip_contact_shrinks_lead_and_clamps_goal);

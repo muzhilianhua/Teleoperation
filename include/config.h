@@ -83,13 +83,15 @@ inline constexpr teleop::GlobalSettings kGlobalDefaults = {
     25.0f,  // jumpDeg: 2500 deg/s at 100 Hz, beyond any human finger
 };
 constexpr float kFilterDCutoffHz = 1.0f;
-constexpr uint16_t kArmSpeed = 50;        // [bringup] arm_speed, also the ALIGN speed limit
-constexpr int16_t kArmHoldTolerance = 5;  // [bringup] arm_hold_tolerance
-constexpr float kAlignTolerance = 3.0f;   // steps, ALIGN -> FOLLOW
-// Streamed speed register = clamp(gain * |v|, floor, cap)  [bringup] dynamic mode
+// Step and steps/s values below are SCS0009 steps; an HLS3606 joint uses them
+// x3.333 (teleop::stepScale), so both models move the same angle.
+constexpr float kArmSpeed = 50.0f;        // [bringup] arm_speed, also the ALIGN speed limit
+constexpr float kArmHoldTolerance = 5.0f; // [bringup] arm_hold_tolerance
+constexpr float kAlignTolerance = 3.0f;   // ALIGN -> FOLLOW
+// Streamed speed = clamp(gain * |v|, floor, gain * vmax) steps/s  [bringup]
+// dynamic mode; the bus caps it at the model's speed-register maximum.
 constexpr float kStreamSpeedGain = 1.3f;
-constexpr uint16_t kStreamSpeedFloor = 50;
-constexpr uint16_t kStreamSpeedCap = 1000;
+constexpr float kStreamSpeedFloor = 50.0f;
 
 // ---- Encoder fault handling -----------------------------------------------
 constexpr uint8_t kEncoderFailCycles = 3;    // consecutive bad reads -> HOLD

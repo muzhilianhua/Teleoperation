@@ -115,6 +115,7 @@ void Console::printHelp() {
       "  home <j>             multi-turn joint: glove held at pose A, fixes the turn count\n"
       "  set <j> exospan <rawA> <span> | servo <a> <b>  enter endpoints directly (dump format)\n"
       "  set <j> vmax|amax|vsat|trk|grip <n>        per-joint speed / tracking / grip lead (0 = off)\n"
+      "  set <j> ilimit <mA>                        HLS goal-current cap (0 = servo protection current)\n"
       "  set lead|mincut|beta|jump|gripload <v>     global parameters\n"
       "  set loadtrip on|off                        firmware load trips (off: servo overload decides)\n"
       "  save | load | defaults | dump              NVS store / reload / reset (RAM) / export\n"
@@ -135,13 +136,15 @@ void Console::printStatus() {
     const JointSnapshot& j = s.joints[i];
     if (!j.settings.enabled && j.state == JointState::Off) continue;
     const teleop::JointDefaults& d = config::kJoints[i];
-    Serial.printf("j%u %-13s %-6s exo %7.2f deg  target %6.1f  goal %6.1f  sent %6.1f  grip %3.0f%s  spd %4u",
+    Serial.printf("j%u %-13s %-6s exo %7.2f deg  target %6.1f  goal %6.1f  sent %6.1f  grip %3.0f%s  spd %5.0f",
                   d.servoId, d.name, jointStateToString(j.state),
                   j.exoFilteredCounts * teleop::kDegreesPerCount, j.target, j.goal, j.sentGoal,
-                  j.gripLead, j.contact ? "*" : " ", j.speedRegister);
+                  j.gripLead, j.contact ? "*" : " ", j.speed);
     if (j.readAgeMs <= config::kServoCommStaleMs) {
-      Serial.printf("  pos %4d tq %d load %5.1f%% %.1fV %dC%s\n", j.servo.position, j.servo.torqueOn,
-                    j.servo.loadPct, j.servo.voltage, j.servo.temperatureC,
+      char current[24] = "";
+      if (j.servo.hasCurrent) snprintf(current, sizeof(current), " %5.0fmA", j.servo.currentMa);
+      Serial.printf("  pos %4d tq %d load %5.1f%%%s %.1fV %dC%s\n", j.servo.position, j.servo.torqueOn,
+                    j.servo.loadPct, current, j.servo.voltage, j.servo.temperatureC,
                     !j.homed ? "  HOME!" : (j.encFresh ? "" : "  ENC!"));
     } else {
       Serial.printf("  servo: no recent reply%s\n", !j.homed ? "  HOME!" : (j.encFresh ? "" : "  ENC!"));
@@ -156,7 +159,8 @@ void Console::printStatus() {
 void Console::printJoints() {
   controller_.snapshot(snapshot_);
   Serial.println(
-      "id name           on enc  exo span   servo A..B   travel     vmax amax  vsat trk  ready home  state  last fault");
+      "id name           model on enc  exo span   servo A..B   travel     vmax  amax  vsat trk  ilimit "
+      "ready home  state  last fault");
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     const teleop::JointDefaults& d = config::kJoints[i];
     const JointSnapshot& j = snapshot_.joints[i];
@@ -187,9 +191,21 @@ void Console::printJoints() {
     }
     // auto = single-turn, homes itself; homed / HOME! = multi-turn, needs `home <j>` at pose A
     const char* home = j.singleTurn ? (j.homed ? "auto " : "wait ") : (j.homed ? "homed" : "HOME!");
-    Serial.printf("%2u %-14s %d  %-4s %-9s  %s  %s %4u %5u %4u %4u  %-5s %s %-6s %s\n", d.servoId,
-                  d.name, s.enabled, enc, exo, servo, travel, s.vmax, s.amax, s.vsat, s.trackSteps,
-                  j.ready ? "yes" : "no", home, jointStateToString(j.state),
+    // `?` = not identified on the bus yet / differs from config.h (cannot arm)
+    char model[8];
+    snprintf(model, sizeof(model), "%s%s", d.model == feetech::ServoModel::Hls3606 ? "HLS" : "SCS",
+             j.modelOk ? "" : "?");
+    char ilimit[8];
+    if (d.model != feetech::ServoModel::Hls3606) {
+      strlcpy(ilimit, "--", sizeof(ilimit));
+    } else if (s.currentLimitMa == 0) {
+      strlcpy(ilimit, "prot", sizeof(ilimit));
+    } else {
+      snprintf(ilimit, sizeof(ilimit), "%u", s.currentLimitMa);
+    }
+    Serial.printf("%2u %-14s %-5s %d  %-4s %-9s  %s  %s %5u %5u %5u %4u  %-6s %-5s %s %-6s %s\n",
+                  d.servoId, d.name, model, s.enabled, enc, exo, servo, travel, s.vmax, s.amax, s.vsat,
+                  s.trackSteps, ilimit, j.ready ? "yes" : "no", home, jointStateToString(j.state),
                   j.lastFault == teleop::Fault::None ? "-" : teleop::faultToString(j.lastFault));
   }
 }
@@ -281,7 +297,8 @@ void Console::plot() {
                 j.exoCounts * teleop::kDegreesPerCount, j.exoFilteredCounts * teleop::kDegreesPerCount,
                 j.target, j.goal, j.sentGoal, j.reference, j.gripLead);
   if (j.readAgeMs <= config::kServoCommStaleMs) {
-    Serial.printf(">present:%d\n>load:%.1f\n>speed_reg:%u\n", j.servo.position, j.servo.loadPct,
-                  j.speedRegister);
+    Serial.printf(">present:%d\n>load:%.1f\n>speed_cmd:%.0f\n", j.servo.position, j.servo.loadPct,
+                  j.speed);
+    if (j.servo.hasCurrent) Serial.printf(">current_ma:%.0f\n", j.servo.currentMa);
   }
 }

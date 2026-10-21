@@ -7,7 +7,7 @@ namespace teleop {
 
 namespace {
 
-constexpr uint16_t kLimitRegister = 300;  // below this a register can itself be the bottleneck
+constexpr uint8_t kLimitLevel = 1;  // the first tier can itself be the bottleneck
 
 uint16_t clampU16(float v, uint16_t lo, uint16_t hi) {
   if (v < lo) return lo;
@@ -19,7 +19,7 @@ uint16_t clampU16(float v, uint16_t lo, uint16_t hi) {
 
 void SpeedSweep::start(const SweepConfig& config, int16_t position, uint32_t nowMs) {
   config_ = config;
-  if (config_.registerCount > SweepResult::kMaxRuns / 2) config_.registerCount = SweepResult::kMaxRuns / 2;
+  if (config_.speedCount > SweepResult::kMaxRuns / 2) config_.speedCount = SweepResult::kMaxRuns / 2;
   result_ = SweepResult();
   nextRun_ = 0;
   overload_ = false;
@@ -37,16 +37,17 @@ void SpeedSweep::abort(const char* reason) {
 }
 
 uint32_t SpeedSweep::runTimeoutMs() const {
-  // 1.5x the time the register allows for the distance, within 2..6 s.
+  // 1.5x the time the commanded speed needs for the distance, within 2..6 s.
   const float distance = fabsf(static_cast<float>(runTarget_ - runStart_));
-  const float ms = 1500.0f * distance / runRegister_ + 500.0f;
+  const float ms = 1500.0f * distance / runSpeed_ + 500.0f;
   if (ms < 2000.0f) return 2000;
   if (ms > 6000.0f) return 6000;
   return static_cast<uint32_t>(ms);
 }
 
 bool SpeedSweep::beginRun(uint32_t nowMs, int16_t position, SweepStep& step) {
-  runRegister_ = config_.registers[nextRun_ / 2];
+  runLevel_ = nextRun_ / 2;
+  runSpeed_ = config_.speeds[runLevel_];
   runDirection_ = (nextRun_ % 2 == 0) ? 1 : -1;
   runStart_ = position;
   runTarget_ = runDirection_ > 0 ? config_.hi : config_.lo;
@@ -54,7 +55,8 @@ bool SpeedSweep::beginRun(uint32_t nowMs, int16_t position, SweepStep& step) {
   const float distance = static_cast<float>(runTarget_ - runStart_) * runDirection_;
   if (distance < 0.5f * static_cast<float>(config_.hi - config_.lo)) {
     SweepRun& run = result_.runs[result_.runCount++];
-    run.speedRegister = runRegister_;
+    run.commandSpeed = runSpeed_;
+    run.level = runLevel_;
     run.direction = runDirection_;
     run.valid = false;
     ++nextRun_;
@@ -67,13 +69,14 @@ bool SpeedSweep::beginRun(uint32_t nowMs, int16_t position, SweepStep& step) {
   phaseStartMs_ = nowMs;
   step.write = true;
   step.goal = runTarget_;
-  step.speed = runRegister_;
+  step.speed = runSpeed_;
   return true;
 }
 
 void SpeedSweep::finishRun(int16_t position, uint32_t nowMs, bool reached) {
   SweepRun& run = result_.runs[result_.runCount++];
-  run.speedRegister = runRegister_;
+  run.commandSpeed = runSpeed_;
+  run.level = runLevel_;
   run.direction = runDirection_;
   run.reached = reached;
   run.maxLoadPct = runMaxLoad_;
@@ -92,13 +95,13 @@ void SpeedSweep::finishRun(int16_t position, uint32_t nowMs, bool reached) {
 
 void SpeedSweep::finishSweep() {
   float satPlus = 0.0f, satMinus = 0.0f;
-  bool fastPlus = false, fastMinus = false;  // arrived at a register >= kLimitRegister
+  bool fastPlus = false, fastMinus = false;  // arrived at a tier >= kLimitLevel
   for (uint8_t i = 0; i < result_.runCount; ++i) {
     const SweepRun& r = result_.runs[i];
     if (!r.valid || !r.reached) continue;
     float& sat = r.direction > 0 ? satPlus : satMinus;
     if (r.speed > sat) sat = r.speed;
-    if (r.speedRegister >= kLimitRegister) (r.direction > 0 ? fastPlus : fastMinus) = true;
+    if (r.level >= kLimitLevel) (r.direction > 0 ? fastPlus : fastMinus) = true;
   }
   result_.saturationPlus = satPlus;
   result_.saturationMinus = satMinus;
@@ -108,8 +111,10 @@ void SpeedSweep::finishSweep() {
   if (!result_.forceLimited()) {
     const float faster = satPlus > satMinus ? satPlus : satMinus;
     const float slower = satPlus < satMinus ? satPlus : satMinus;
-    result_.suggestedVmax = clampU16(ceilf(1.2f * faster), 50, 1000);
-    result_.suggestedVsat = clampU16(floorf(0.9f * slower), 1, 1000);
+    const uint16_t maxSpeed = static_cast<uint16_t>(config_.maxSuggestedSpeed);
+    result_.suggestedVmax =
+        clampU16(ceilf(1.2f * faster), static_cast<uint16_t>(config_.minSuggestedVmax), maxSpeed);
+    result_.suggestedVsat = clampU16(floorf(0.9f * slower), 1, maxSpeed);
   }
   phase_ = Phase::Done;
 }
@@ -160,7 +165,7 @@ SweepStep SpeedSweep::update(uint32_t nowMs, int16_t position, float loadPct, bo
 
     case Phase::Settle:
       if (nowMs - phaseStartMs_ < config_.settleMs || !valid) break;
-      if (nextRun_ >= 2 * config_.registerCount) {
+      if (nextRun_ >= 2 * config_.speedCount) {
         finishSweep();
         step.done = true;
         break;

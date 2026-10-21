@@ -40,6 +40,7 @@ enum class Fault : uint8_t {
   Overheat,
   SupplyVoltage,
   TrackingError,
+  OverCurrent,  // HLS: |current| near its goal-current cap for too long
 };
 
 const char* faultToString(Fault fault);
@@ -69,6 +70,10 @@ struct SupervisorConfig {
   float supplyMaxV = 6.5f;
   uint32_t supplyMs = 200;
   uint8_t commFailCount = 3;
+  // HLS3606: trip when |current| >= currentTripMa for currentTripMs
+  // (DEX_hand_software: 0.9 x the effective current cap, 0.2 s). 0 = off.
+  float currentTripMa = 0.0f;
+  uint32_t currentTripMs = 200;
 };
 
 struct ServoSample {
@@ -83,6 +88,8 @@ struct ServoSample {
   // The grip limiter sees the finger pressing on an object: falling behind the
   // goal is expected then, so the tracking check is suspended.
   bool inContact = false;
+  bool hasCurrent = false;  // HLS3606 reports current, SCS0009 does not
+  float currentMa = 0.0f;
 };
 
 class JointSupervisor {
@@ -103,7 +110,7 @@ class JointSupervisor {
  private:
   SupervisorConfig config_;
   uint8_t failures_ = 0;
-  Persistence loadTrip_, loadHard_, tracking_, overheat_;
+  Persistence loadTrip_, loadHard_, tracking_, overheat_, overCurrent_;
 };
 
 // Supply check on the median voltage across all servos, so one bad reading

@@ -75,8 +75,11 @@ struct JointSnapshot {
   float gripLead = 0.0f;           // current grip limiter lead (steps)
   bool contact = false;            // grip limiter sees the finger pressing on something
   float reference = 0.0f;          // servo-capability model used by the tracking check
-  uint16_t speedRegister = 0;
+  float speed = 0.0f;              // commanded speed, native steps/s
   bool goalSent = false;
+  feetech::ServoModel detectedModel = feetech::ServoModel::Unknown;
+  bool modelOk = false;            // identified on the bus and equal to config.h
+  float currentLimitMa = 0.0f;     // HLS: effective goal-current cap (0 until armed)
   bool servoOk = false;            // last read attempt succeeded
   uint32_t readAgeMs = 0;          // since the last good read
   ServoState servo;
@@ -145,8 +148,13 @@ class TeleopController {
     float sentGoal = 0.0f;
     bool contact = false;
     float reference = 0.0f;
-    uint16_t speedRegister = 0;
+    float speed = 0.0f;  // native steps/s
     bool goalSent = false;
+    // Servo model: steps of this joint are scale x SCS0009 steps.
+    float scale = 1.0f;
+    feetech::ServoModel detectedModel = feetech::ServoModel::Unknown;
+    bool modelOk = false;
+    uint16_t protectionRaw = 0;  // HLS protection current (6.5 mA units), read when arming
     // Servo readings (round-robin)
     bool servoOk = false;
     bool readThisCycle = false;
@@ -204,7 +212,9 @@ class TeleopController {
   void disarmAll(teleop::Fault fault, int jointIndex, const char* reason);
   void torqueOffAll(const char* reason);
   bool switchOff(const uint8_t* ids, uint8_t count);
-  uint16_t streamSpeed(float velocity) const;
+  float streamSpeed(const JointChannel& ch) const;
+  float effectiveCurrentMa(const JointChannel& ch) const;
+  void applyGoalCurrent(JointChannel& ch);
   void publish();
   void message(const char* format, ...) __attribute__((format(printf, 2, 3)));
 

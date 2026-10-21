@@ -81,7 +81,8 @@ void test_free_joint_measures_both_directions() {
   TEST_ASSERT_TRUE(r.applicable());
   // At register 100 the register itself is the limit.
   TEST_ASSERT_FLOAT_WITHIN(5.0f, 100.0f, r.runs[0].speed);
-  TEST_ASSERT_EQUAL(100, r.runs[0].speedRegister);
+  TEST_ASSERT_EQUAL_FLOAT(100.0f, r.runs[0].commandSpeed);
+  TEST_ASSERT_EQUAL(0, r.runs[0].level);
   TEST_ASSERT_EQUAL(1, r.runs[0].direction);
   TEST_ASSERT_EQUAL(-1, r.runs[1].direction);
 }

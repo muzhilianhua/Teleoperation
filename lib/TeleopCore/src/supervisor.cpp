@@ -17,6 +17,7 @@ const char* faultToString(Fault fault) {
     case Fault::Overheat: return "overheat";
     case Fault::SupplyVoltage: return "supply voltage";
     case Fault::TrackingError: return "tracking error";
+    case Fault::OverCurrent: return "over-current";
   }
   return "?";
 }
@@ -56,10 +57,16 @@ Fault JointSupervisor::update(const ServoSample& s, bool armed, float goal, floa
   const bool lagging = armed && tracking_.update(!s.inContact && lag > config_.trackingErrorSteps, nowMs,
                                                  config_.trackingErrorMs);
   if (!armed) tracking_.reset();
+  const bool overCurrent =
+      armed && overCurrent_.update(s.hasCurrent && config_.currentTripMa > 0.0f &&
+                                       fabsf(s.currentMa) >= config_.currentTripMa,
+                                   nowMs, config_.currentTripMs);
+  if (!armed) overCurrent_.reset();
 
   if (hard) return Fault::LoadHard;
   if (trip) return Fault::LoadTrip;
   if (hot) return Fault::Overheat;
+  if (overCurrent) return Fault::OverCurrent;
   if (lagging) return Fault::TrackingError;
   return Fault::None;
 }
@@ -70,6 +77,7 @@ void JointSupervisor::reset() {
   loadHard_.reset();
   tracking_.reset();
   overheat_.reset();
+  overCurrent_.reset();
 }
 
 float median(const float* values, size_t count) {

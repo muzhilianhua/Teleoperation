@@ -55,6 +55,8 @@ TeleopController::TeleopController(ServoBus& bus, FeetechPort& port, AS5048BGrou
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     JointChannel& ch = channels_[i];
     ch.def = &config::kJoints[i];
+    ch.scale = teleop::stepScale(*ch.def);
+    bus_.setModel(ch.def->servoId, ch.def->model);  // until boot identifies the bus
     ch.settings = teleop::defaultSettings(*ch.def);
     ch.limiter = teleop::RateLimiter(ch.def->travelMin, ch.settings.vmax, ch.settings.amax,
                                      ch.def->travelMin, ch.def->travelMax);
@@ -150,13 +152,21 @@ void TeleopController::applyRuntimeParams(JointChannel& ch) {
   teleop::SupervisorConfig sc;
   sc.trackingErrorSteps = ch.settings.trackSteps;
   sc.loadTripEnabled = global_.loadTripEnabled;
+  // DEX_hand_software: trip at 0.9 x the effective current cap for 0.2 s.
+  sc.currentTripMa = 0.9f * effectiveCurrentMa(ch);
   ch.supervisor.setConfig(sc);
+  applyGoalCurrent(ch);
   teleop::GripLimiter::Config gc;
   gc.maxLead = ch.settings.gripSteps;
   gc.loadPct = global_.gripLoadPct;
+  // Step-based tuning is in SCS0009 steps; keep the same angles on an HLS joint.
+  gc.shrinkStep *= ch.scale;
+  gc.growStep *= ch.scale;
+  gc.minLead *= ch.scale;
+  gc.stallSpeed *= ch.scale;
   ch.grip.setConfig(gc);
   ch.limiter.setTravel(ch.def->travelMin, ch.def->travelMax);
-  const float speed = ch.state == JointState::Align ? config::kArmSpeed : ch.settings.vmax;
+  const float speed = ch.state == JointState::Align ? config::kArmSpeed * ch.scale : ch.settings.vmax;
   ch.limiter.setLimits(speed, ch.settings.amax);
   ch.model.setTravel(ch.def->travelMin, ch.def->travelMax);
   ch.model.setLimits(ch.settings.vsat, kModelAcceleration);
@@ -346,6 +356,8 @@ void TeleopController::readServos(uint32_t nowMs) {
     sample.temperatureC = st.temperatureC;
     sample.errorByte = st.errorByte;
     sample.status = st.status;
+    sample.hasCurrent = st.hasCurrent;
+    sample.currentMa = st.currentMa;
     const Fault fault = ch.supervisor.update(sample, ch.armed(), ch.sentGoal, ch.reference, nowMs);
 
     if (fault != Fault::None && !ch.armed()) {
@@ -432,7 +444,7 @@ void TeleopController::stepJoint(uint8_t index, float dt, uint32_t nowMs) {
       }
       ch.limiter.setTarget(ch.target);
       ch.goal = ch.limiter.step(dt);
-      if (fabsf(ch.goal - ch.target) <= config::kAlignTolerance) {
+      if (fabsf(ch.goal - ch.target) <= config::kAlignTolerance * ch.scale) {
         ch.state = JointState::Follow;
         ch.limiter.setLimits(ch.settings.vmax, ch.settings.amax);
         message("joint %u aligned -> FOLLOW", id);
@@ -460,7 +472,7 @@ void TeleopController::stepJoint(uint8_t index, float dt, uint32_t nowMs) {
           ch.encGoodSinceMs = nowMs;
         } else if (nowMs - ch.encGoodSinceMs >= config::kHoldRecoverMs) {
           ch.state = JointState::Align;
-          ch.limiter.setLimits(config::kArmSpeed, ch.settings.amax);
+          ch.limiter.setLimits(config::kArmSpeed * ch.scale, ch.settings.amax);
           message("joint %u encoder back -> ALIGN", id);
           break;
         }
@@ -495,21 +507,39 @@ void TeleopController::writeGoals(uint32_t nowMs) {
     // to a disarmed SCS0009 would switch its torque on by itself.
     if (!ch.armed() || !ch.servo.torqueOn || nowMs - ch.lastGoodReadMs > config::kServoStaleMs) continue;
     if (ch.state == JointState::Sweep) continue;  // the sweep writes its own single goals
-    ch.speedRegister = streamSpeed(ch.limiter.velocity());
+    ch.speed = streamSpeed(ch);
     ids[n] = ch.def->servoId;
     positions[n] = static_cast<int16_t>(lroundf(ch.sentGoal));
-    speeds[n] = ch.speedRegister;
+    speeds[n] = ch.speed;
     ch.goalSent = true;
     ++n;
   }
   if (n > 0) bus_.syncWriteGoal(ids, positions, speeds, n);
 }
 
-uint16_t TeleopController::streamSpeed(float velocity) const {
-  const float wanted = ceilf(config::kStreamSpeedGain * fabsf(velocity));
-  float speed = max(static_cast<float>(config::kStreamSpeedFloor), wanted);
-  speed = min(speed, static_cast<float>(config::kStreamSpeedCap));
-  return static_cast<uint16_t>(speed);
+// Speed sent with a streamed goal, in the joint's own steps/s ([bringup]
+// dynamic mode: gain x |setpoint velocity|, with a floor so the servo glides
+// between updates). The bus converts it to the model's speed register.
+float TeleopController::streamSpeed(const JointChannel& ch) const {
+  const float floorSpeed = config::kStreamSpeedFloor * ch.scale;
+  const float cap = max(config::kStreamSpeedGain * ch.settings.vmax, floorSpeed);
+  const float wanted = config::kStreamSpeedGain * fabsf(ch.limiter.velocity());
+  return min(max(wanted, floorSpeed), cap);
+}
+
+// HLS goal current: the servo's protection current, or the operator's
+// `ilimit` if lower. 0 when unknown (not armed yet) or for an SCS0009.
+float TeleopController::effectiveCurrentMa(const JointChannel& ch) const {
+  if (ch.def->model != feetech::ServoModel::Hls3606 || ch.protectionRaw == 0) return 0.0f;
+  const float protection = ch.protectionRaw * feetech::modelInfo(ch.def->model).currentMaPerUnit;
+  return ch.settings.currentLimitMa > 0 ? min(protection, static_cast<float>(ch.settings.currentLimitMa))
+                                        : protection;
+}
+
+void TeleopController::applyGoalCurrent(JointChannel& ch) {
+  if (ch.def->model != feetech::ServoModel::Hls3606 || ch.protectionRaw == 0) return;
+  const float units = effectiveCurrentMa(ch) / feetech::modelInfo(ch.def->model).currentMaPerUnit;
+  bus_.setGoalCurrent(ch.def->servoId, static_cast<uint16_t>(max(1.0f, floorf(units))));
 }
 
 // ---- commands -----------------------------------------------------------------
@@ -731,8 +761,10 @@ void TeleopController::handleLimitsCheck() {
     }
     const bool match = lo == ch.def->travelMin && hi == ch.def->travelMax;
     mismatches += match ? 0 : 1;
+    const bool multiTurn = lo == 0 && hi == 0 && bus_.model(id) == feetech::ServoModel::Hls3606;
     message("limits j%u %-13s servo %4d..%-4d  travel %4d..%-4d  %s", id, ch.def->name, lo, hi,
-            ch.def->travelMin, ch.def->travelMax, match ? "ok" : "MISMATCH");
+            ch.def->travelMin, ch.def->travelMax,
+            match ? "ok" : (multiTurn ? "MISMATCH (HLS factory multi-turn)" : "MISMATCH"));
   }
   message(mismatches ? "%u mismatch(es): `limits write all` syncs them" : "all defined joints match",
           mismatches);
@@ -756,8 +788,10 @@ void TeleopController::handleLimitsWrite(uint8_t servoId) {
       continue;  // EEPROM is only written when it differs
     }
     const bool ok = bus_.writeAngleLimits(id, ch.def->travelMin, ch.def->travelMax);
-    message("limits j%u: %d..%d -> %d..%d %s", id, lo, hi, ch.def->travelMin, ch.def->travelMax,
-            ok ? "written and verified" : "FAILED (torque must be off; check the bus)");
+    const bool hls = bus_.model(id) == feetech::ServoModel::Hls3606;
+    message("limits j%u: %d..%d -> %d..%d %s%s", id, lo, hi, ch.def->travelMin, ch.def->travelMax,
+            ok ? "written and verified" : "FAILED (torque must be off; check the bus)",
+            ok && hls ? "; power-cycle the servos before arming" : "");
   }
   if (servoId != 0 && channelForServo(servoId) == nullptr) message("no joint with servo id %u", servoId);
 }
@@ -777,15 +811,15 @@ void TeleopController::handleSweep(uint8_t servoId) {
     return;
   }
   // Calibrated servo endpoints are the range the operator has checked by hand;
-  // otherwise the configured travel. 10 steps of margin on each side.
+  // otherwise the configured travel. 10 SCS steps of margin on each side.
   int16_t lo = d.travelMin, hi = d.travelMax;
   if (teleop::servoCalibrated(ch.settings, d)) {
     lo = min(ch.settings.servoA, ch.settings.servoB);
     hi = max(ch.settings.servoA, ch.settings.servoB);
   }
-  lo += 10;
-  hi -= 10;
-  if (hi - lo < 60) {
+  lo += static_cast<int16_t>(lroundf(10.0f * ch.scale));
+  hi -= static_cast<int16_t>(lroundf(10.0f * ch.scale));
+  if (hi - lo < 60.0f * ch.scale) {
     message("sweep refused: joint %u range %d..%d is too short to time", servoId, lo, hi);
     return;
   }
@@ -811,10 +845,18 @@ void TeleopController::handleSweep(uint8_t servoId) {
   teleop::SweepConfig cfg;
   cfg.lo = lo;
   cfg.hi = hi;
+  // Tiers, tolerances and suggestion bounds are SCS values scaled to this model.
+  for (uint8_t i = 0; i < cfg.speedCount; ++i) cfg.speeds[i] *= ch.scale;
+  cfg.approachSpeed *= ch.scale;
+  cfg.reachTolerance *= ch.scale;
+  cfg.minSuggestedVmax *= ch.scale;
+  const feetech::ModelInfo& info = feetech::modelInfo(d.model);
+  cfg.maxSuggestedSpeed = info.maxSpeedRegister * info.stepsPerSpeedUnit;
   sweep_.start(cfg, st.position, nowMs);
   sweepJoint_ = static_cast<int8_t>(index);
-  message("sweep j%u (%s): range %d..%d, registers 100/300/600/1000, both directions; `x`, `disarm` or BOOT aborts",
-          servoId, d.name, lo, hi);
+  message("sweep j%u (%s, %s): range %d..%d, %.0f/%.0f/%.0f/%.0f steps/s, both directions; `x`, `disarm` "
+          "or BOOT aborts",
+          servoId, d.name, info.name, lo, hi, cfg.speeds[0], cfg.speeds[1], cfg.speeds[2], cfg.speeds[3]);
 }
 
 void TeleopController::stepSweep(uint8_t index, uint32_t nowMs) {
@@ -829,11 +871,11 @@ void TeleopController::stepSweep(uint8_t index, uint32_t nowMs) {
     const teleop::SweepResult& r = sweep_.result();
     const teleop::SweepRun& run = r.runs[r.runCount - 1];
     if (!run.valid) {
-      message("sweep j%u reg %4u %c: skipped (previous move did not get back far enough)",
-              ch.def->servoId, run.speedRegister, run.direction > 0 ? '+' : '-');
+      message("sweep j%u %5.0f %c: skipped (previous move did not get back far enough)", ch.def->servoId,
+              run.commandSpeed, run.direction > 0 ? '+' : '-');
     } else {
-      message("sweep j%u reg %4u %c: %4.0f steps/s %s, max load %.0f %%", ch.def->servoId,
-              run.speedRegister, run.direction > 0 ? '+' : '-', run.speed,
+      message("sweep j%u %5.0f %c: %5.0f steps/s %s, max load %.0f %%", ch.def->servoId,
+              run.commandSpeed, run.direction > 0 ? '+' : '-', run.speed,
               run.reached ? "arrived  " : "TIMED OUT", run.maxLoadPct);
     }
   }
@@ -967,18 +1009,28 @@ void TeleopController::loadDefaults() {
 }
 
 void TeleopController::pingAll() {
-  for (const JointChannel& ch : channels_) {
+  for (JointChannel& ch : channels_) {
     const uint8_t id = ch.def->servoId;
     feetech::ServoModel model = feetech::ServoModel::Unknown;
     uint8_t fwMajor = 0, fwMinor = 0;
     if (!bus_.identify(id, model, fwMajor, fwMinor)) {
+      ch.detectedModel = feetech::ServoModel::Unknown;
+      ch.modelOk = false;
       message("servo %u (%s): no reply", id, ch.def->name);
       continue;
     }
-    // Encode and decode this id with the model actually on the bus.
+    ch.detectedModel = model;
+    ch.modelOk = model == ch.def->model;
+    // Decode this id as what is actually on the bus, so monitor / limits work
+    // even when config.h is wrong; arming stays refused until it matches.
     if (model != feetech::ServoModel::Unknown) bus_.setModel(id, model);
-    message("servo %u (%s): %s, firmware %u.%u", id, ch.def->name, feetech::modelName(model), fwMajor,
-            fwMinor);
+    if (ch.modelOk) {
+      message("servo %u (%s): %s, firmware %u.%u", id, ch.def->name, feetech::modelName(model), fwMajor,
+              fwMinor);
+    } else {
+      message("servo %u (%s): %s on the bus but config.h says %s: joint cannot be armed", id, ch.def->name,
+              feetech::modelName(model), feetech::modelName(ch.def->model));
+    }
   }
 }
 
@@ -987,6 +1039,11 @@ void TeleopController::pingAll() {
 bool TeleopController::preflight(uint8_t index, ServoState& st) {
   JointChannel& ch = channels_[index];
   const uint8_t id = ch.def->servoId;
+  if (!ch.modelOk) {
+    message("arm refused: servo %u is %s, config.h expects %s (run `ping` after fixing)", id,
+            feetech::modelName(ch.detectedModel), feetech::modelName(ch.def->model));
+    return false;
+  }
   if (!teleop::jointReady(ch.settings, *ch.def, config::kEncoderCount)) {
     message("arm refused: joint %u %s", id, notReadyReason(ch.settings, *ch.def));
     return false;
@@ -1022,13 +1079,34 @@ const char* TeleopController::armJoint(uint8_t index, const ServoState& st, uint
   // Goal before torque: a goal write switches torque on by itself on SCS0009,
   // so the joint may only ever be told to hold where it already is.
   const int16_t hold = st.position;
+  if (!ch.modelOk) return "servo model not identified or not as in config.h (run `ping`)";
+  if (ch.def->model == feetech::ServoModel::Hls3606) {
+    // DEX_hand_software arming checks: single-turn limits covering the
+    // travel, resolution 1, position mode, a usable protection current.
+    feetech::ArmInfo info;
+    if (!bus_.readArmInfo(id, info)) return "no reply reading the HLS setup registers";
+    if (info.minLimit == 0 && info.maxLimit == 0) {
+      return "HLS angle limits are 0/0 (factory multi-turn): run `limits write <j>`, then power-cycle";
+    }
+    if (info.minLimit > ch.def->travelMin || info.maxLimit < ch.def->travelMax) {
+      return "HLS angle limits do not cover the travel: run `limits write <j>`, then power-cycle";
+    }
+    if (info.resolution != 1) return "HLS angle resolution (register 30) is not 1";
+    if (info.mode != 0) return "HLS not in position mode (register 33)";
+    if (info.protectionCurrent < 1 || info.protectionCurrent > feetech::kHlsMaxGoalCurrent) {
+      return "HLS protection current (register 28) out of range";
+    }
+    if (hold < 0) return "HLS position is negative (multi-turn): set the limits and power-cycle";
+    ch.protectionRaw = info.protectionCurrent;
+    applyGoalCurrent(ch);  // before the first goal: it carries the current cap
+  }
   ServoState check;
-  if (!bus_.writeGoal(id, hold, config::kArmSpeed)) return "goal write failed";
+  if (!bus_.writeGoal(id, hold, config::kArmSpeed * ch.scale)) return "goal write failed";
   if (!bus_.writeTorque(id, true)) return "torque write failed";
   if (!bus_.readState(id, check)) return "no read-back after arming";
   if (!check.torqueOn) return "torque did not switch on";
   if (check.goal != hold) return "goal register does not match the hold position";
-  if (abs(check.position - hold) > config::kArmHoldTolerance) return "joint moved while arming";
+  if (abs(check.position - hold) > config::kArmHoldTolerance * ch.scale) return "joint moved while arming";
 
   ch.state = JointState::Align;
   ch.lastFault = Fault::None;
@@ -1036,8 +1114,9 @@ const char* TeleopController::armJoint(uint8_t index, const ServoState& st, uint
   ch.servoOk = true;
   ch.lastGoodReadMs = nowMs;
   ch.limiter.reset(hold);
-  ch.limiter.setLimits(config::kArmSpeed, ch.settings.amax);
+  ch.limiter.setLimits(config::kArmSpeed * ch.scale, ch.settings.amax);
   ch.model.reset(hold);
+  applyRuntimeParams(ch);  // current trip now that the protection current is known
   ch.goal = ch.sentGoal = ch.reference = hold;
   ch.supervisor.reset();
   ch.grip.reset();
@@ -1212,7 +1291,10 @@ void TeleopController::publish() {
     j.gripLead = ch.grip.lead();
     j.contact = ch.contact;
     j.reference = ch.reference;
-    j.speedRegister = ch.speedRegister;
+    j.speed = ch.speed;
+    j.detectedModel = ch.detectedModel;
+    j.modelOk = ch.modelOk;
+    j.currentLimitMa = effectiveCurrentMa(ch);
     j.goalSent = ch.goalSent;
     j.servoOk = ch.servoOk;
     j.readAgeMs = nowMs - ch.lastGoodReadMs;
