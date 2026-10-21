@@ -8,7 +8,7 @@
 #include <Wire.h>
 #include <esp_task_wdt.h>
 #include <feetech_port.h>
-#include <scs_bus.h>
+#include <feetech_mixed_bus.h>
 
 #include "config.h"
 #include "console.h"
@@ -29,7 +29,7 @@ const char* const kEncoderNames[] = {"E40", "E44", "E48", "E4C", "E50", "E54", "
 
 AS5048BGroup encoderGroup;
 FeetechPort servoPort(Serial1);
-ScsBus servoBus(servoPort);
+FeetechMixedBus servoBus(servoPort);
 TeleopController controller(servoBus, servoPort, encoderGroup);
 Console console(controller);
 

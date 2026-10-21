@@ -75,8 +75,10 @@ bool TeleopController::begin() {
 
   message("servo bus echo: %s", port_.echo() ? "detected, filtering enabled" : "none");
   loadConfig(true);
-  torqueOffAll("boot");
+  // Identify first (~10 ms): reads decode per model, so the torque-off
+  // read-back below could not check a servo whose model is still unknown.
   pingAll();
+  torqueOffAll("boot");
   publish();
   return true;
 }
@@ -485,7 +487,7 @@ void TeleopController::stepJoint(uint8_t index, float dt, uint32_t nowMs) {
 void TeleopController::writeGoals(uint32_t nowMs) {
   uint8_t ids[teleop::kMaxJoints];
   int16_t positions[teleop::kMaxJoints];
-  uint16_t speeds[teleop::kMaxJoints];
+  float speeds[teleop::kMaxJoints];
   uint8_t n = 0;
   for (JointChannel& ch : channels_) {
     ch.goalSent = false;
@@ -967,13 +969,16 @@ void TeleopController::loadDefaults() {
 void TeleopController::pingAll() {
   for (const JointChannel& ch : channels_) {
     const uint8_t id = ch.def->servoId;
-    uint16_t model = 0;
-    if (bus_.ping(id, &model)) {
-      message("servo %u (%s): model %u%s", id, ch.def->name, model,
-              model == bus_.expectedModel() ? "" : " (unexpected)");
-    } else {
+    feetech::ServoModel model = feetech::ServoModel::Unknown;
+    uint8_t fwMajor = 0, fwMinor = 0;
+    if (!bus_.identify(id, model, fwMajor, fwMinor)) {
       message("servo %u (%s): no reply", id, ch.def->name);
+      continue;
     }
+    // Encode and decode this id with the model actually on the bus.
+    if (model != feetech::ServoModel::Unknown) bus_.setModel(id, model);
+    message("servo %u (%s): %s, firmware %u.%u", id, ch.def->name, feetech::modelName(model), fwMajor,
+            fwMinor);
   }
 }
 
