@@ -5,6 +5,7 @@
 #include <stdarg.h>
 
 #include "config_store.h"
+#include "host_telemetry.h"
 
 using teleop::Fault;
 using teleop::FaultScope;
@@ -73,7 +74,10 @@ bool TeleopController::begin() {
   commands_ = xQueueCreate(32, sizeof(QueuedCommand));
   messages_ = xQueueCreate(64, sizeof(hostlink::Event));
   completions_ = xQueueCreate(32, sizeof(Completion));
-  if (commands_ == nullptr || messages_ == nullptr || completions_ == nullptr) return false;
+  telemetry_ = xQueueCreate(16, sizeof(TelemetrySample));
+  if (commands_ == nullptr || messages_ == nullptr || completions_ == nullptr || telemetry_ == nullptr) {
+    return false;
+  }
 
   pinMode(config::kEstopPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(config::kEstopPin), estopIsr, FALLING);
@@ -118,6 +122,15 @@ bool TeleopController::popEvent(hostlink::Event& event) {
 
 bool TeleopController::popCompletion(Completion& completion) {
   return xQueueReceive(completions_, &completion, 0) == pdTRUE;
+}
+
+void TeleopController::setTelemetryStream(bool on) {
+  telemetryOn_ = on;
+  if (!on) xQueueReset(telemetry_);
+}
+
+bool TeleopController::popTelemetry(TelemetrySample& sample, TickType_t wait) {
+  return xQueueReceive(telemetry_, &sample, wait) == pdTRUE;
 }
 
 void TeleopController::postEvent(const EventTag& tag, const char* format, va_list args) {
@@ -214,6 +227,7 @@ void TeleopController::run() {
   for (;;) {
     vTaskDelayUntil(&lastWake, period);
     const uint32_t wakeUs = micros();
+    cycleWakeUs_ = wakeUs;
     updateTiming(wakeUs);
     cycle();
     const uint32_t execUs = micros() - wakeUs;
@@ -1327,11 +1341,14 @@ void TeleopController::publish() {
   const uint32_t nowMs = millis();
   Snapshot& s = staging_;
   s.cycle = cycle_;
+  s.tUs = cycleWakeUs_;
   s.uptimeMs = nowMs;
   s.armedCount = armedCount();
   s.lastHandFault = lastHandFault_;
   s.torqueOffConfirmed = torqueOffConfirmed_;
   s.droppedEvents = droppedEvents_;
+  s.droppedTelemetry = droppedTelemetry_;
+  s.sweepActive = sweepJoint_ >= 0;
   s.echo = port_.echo();
   s.monitor = monitor_;
   s.global = global_;
@@ -1385,4 +1402,14 @@ void TeleopController::publish() {
   portENTER_CRITICAL(&mux_);
   shared_ = s;
   portEXIT_CRITICAL(&mux_);
+
+  if (telemetryOn_) {
+    fillTelemetry(s, telemetryScratch_);
+    if (telemetryGap_) telemetryScratch_.handFlags |= hostlink::kHandTelemetryDropped;
+    sampleScratch_.length = static_cast<uint16_t>(
+        hostlink::encodeTelemetry(telemetryScratch_, sampleScratch_.bytes, sizeof(sampleScratch_.bytes)));
+    // Never wait: a slow host loses samples (flagged in the next one), not cycles.
+    telemetryGap_ = xQueueSend(telemetry_, &sampleScratch_, 0) != pdTRUE;
+    if (telemetryGap_) ++droppedTelemetry_;
+  }
 }

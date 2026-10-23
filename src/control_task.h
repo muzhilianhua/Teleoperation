@@ -33,6 +33,13 @@ const char* jointStateToString(JointState state);
 
 using Command = teleop::ParsedCommand;
 
+// One cycle's TELEMETRY payload, encoded by the control task so the host
+// link gets every cycle with its exact timestamp.
+struct TelemetrySample {
+  uint16_t length;
+  uint8_t bytes[hostlink::telemetrySize(hostlink::kMaxJoints)];
+};
+
 // Reply to a command posted with a host sequence number: sent after every
 // event it raised, so the host knows the command is finished.
 struct Completion {
@@ -97,11 +104,14 @@ struct JointSnapshot {
 
 struct Snapshot {
   uint32_t cycle = 0;
+  uint32_t tUs = 0;  // micros() at this cycle's wake-up
   uint32_t uptimeMs = 0;
   uint8_t armedCount = 0;
   teleop::Fault lastHandFault = teleop::Fault::None;
   bool torqueOffConfirmed = true;
   uint32_t droppedEvents = 0;  // events lost to a full queue
+  uint32_t droppedTelemetry = 0;  // per-cycle samples lost to a full queue
+  bool sweepActive = false;
   bool echo = false;
   bool monitor = false;
   teleop::GlobalSettings global;
@@ -133,6 +143,9 @@ class TeleopController {
   // completion and again before reporting it: its events were queued first.
   bool popEvent(hostlink::Event& event);
   bool popCompletion(Completion& completion);
+  // Per-cycle telemetry for the host link; off (and the queue empty) by default.
+  void setTelemetryStream(bool on);
+  bool popTelemetry(TelemetrySample& sample, TickType_t wait);
 
  private:
   struct QueuedCommand {
@@ -255,6 +268,13 @@ class TeleopController {
   QueueHandle_t commands_ = nullptr;
   QueueHandle_t messages_ = nullptr;
   QueueHandle_t completions_ = nullptr;
+  QueueHandle_t telemetry_ = nullptr;
+  volatile bool telemetryOn_ = false;
+  volatile uint32_t droppedTelemetry_ = 0;
+  bool telemetryGap_ = false;
+  uint32_t cycleWakeUs_ = 0;
+  hostlink::Telemetry telemetryScratch_;
+  TelemetrySample sampleScratch_;
   uint16_t currentSeq_ = 0;  // command being handled (control task only)
   bool cmdFailed_ = false;
   volatile uint32_t droppedEvents_ = 0;
