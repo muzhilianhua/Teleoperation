@@ -160,12 +160,28 @@ This ports servo_bringup's verify-motion speed sweep to the firmware.
 
 The SCS0009's torque ceiling (register 16) is already at its factory maximum of 100 %. What used to stop a grasp were the firmware's own checks.
 
-**HLS3606 current.** Every goal carries the joint's goal current (`min(protection, ilimit)`), so the squeeze is limited by current, not by the load percentage alone. The firmware trips `over-current` on that joint alone when |current| ≥ 0.9 × the cap for 0.2 s (as DEX_hand_software does). Lower `ilimit` for a gentler grasp; `status` shows the present current.
+**HLS3606 current.** Every goal carries the joint's goal current (the *cap*, `min(protection, ilimit)`): the servo never drives more phase current than that, so the cap bounds the squeeze.
+- The grip limiter regulates **|current| as % of the cap** on HLS joints (the load register is the drive duty, which drops once the current limit acts). A held grasp therefore settles near `gripload` × cap, e.g. 60 % × 3000 mA ≈ 1.8 A.
+- The firmware trips `over-current` on that joint alone when |current| ≥ `itrip` (default 90 %) × the cap for 0.2 s (as DEX_hand_software does). With the limiter holding ~60 %, this fires only when the limiter cannot help, e.g. a finger blocked while moving.
+- The servo's own over-current cut-out (unload condition bit 3, register 38: 1 s on the first unit) stays on and is reported as `servo error`.
+- **Phase current is not supply current.** The reading (register 69) is the motor phase current. The supply sees about phase current × drive duty: a servo stalled at 2.7 A may draw only ~0.35 A from the supply. `status` and `plot` show this estimate (`~… in`, `supply_est_ma`).
+
+**Choosing `ilimit`.** Take the smallest of three bounds, then the lowest value that still holds the object:
+1. *Motor*: at most the full-voltage stall current V / R. The factory protection current (5.2 A) is a ceiling, not a working value.
+2. *Heat*: winding loss is I²R. With the thermal resistance R_th and time constant τ measured on the bench, the continuous current is I_cont = √((T_max − T_amb) / (R · R_th)), with T_max ≈ 55 °C to stay clear of the 65 °C trip. A held grasp runs at `gripload` × cap, so cap ≤ I_cont / 0.6.
+3. *Supply*: in fast motion the duty approaches 100 % and supply current approaches the cap, so Σ caps (+ SCS stall currents) ≤ 70–80 % of the supply rating, and the servo voltage must stay above 5.5 V.
+
+Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on`):
+- **Units and R.** Hold a few currents below the cap (adjust `grip`, or `set <j> itrip 0` to hold at the cap; the servo's own cut-out still acts). Check `current_ma × load / 100` against the supply ammeter with only this servo loaded: if they agree, the 6.5 mA unit is right; if they differ by a fixed factor, the unit is wrong. Stalled: R ≈ V × load% / I.
+- **Heat.** Hold a fixed current for 10 min and log `temp_c`; fit ΔT(t) = ΔT_ss (1 − e^(−t/τ)), R_th = ΔT_ss / (I²R).
+- **Supply.** Fast full-hand open/close plus a full grasp: peak supply current and the lowest servo voltage in `status`.
+
+`itrip` is a bench setting: it is not saved and returns to 90 % after boot, `load` or `defaults`.
 
 **`loadtrip` (default off).** When off, the firmware load trips (75 % / 0.3 s, 80 % / 0.1 s) never fire. A joint is released only when the servo itself reports overload or over-current, i.e. its own protection (80 % for 1 s) gave up; the disarm message says so. That joint alone goes off. `set loadtrip on` restores the M1 behaviour.
 
 **Grip limiter, per joint `grip` (default 60 steps, 0 = off).** It caps how far the sent goal may lead the measured position.
-- On contact (load ≥ `gripload`, speed < 20 steps/s), the cap shrinks by 2 steps per read, down to 3.
+- On contact (load ≥ `gripload`, speed < 20 steps/s; on HLS joints current ≥ `gripload` % of the cap), the cap shrinks by 2 steps per read, down to 3 (SCS steps, ×3.333 on HLS).
 - When the load falls below `gripload − 10`, it grows back by 4 per read.
 - The held squeeze therefore settles near `gripload` (global, default 60 %), whatever the joint's P gain. This is below the servo's 80 % protection, so a grasp can be held instead of dropped after 1 s.
 - In free motion the load is low and the cap stays at `grip`.
@@ -183,8 +199,8 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 | Command | Effect |
 |---|---|
 | `help` | List commands |
-| `status` | Armed count, last hand-level fault, one line per enabled or armed joint, global parameters. Each joint line shows state, exo, target, goal, sent goal, grip lead (`*` = contact), commanded speed (steps/s), and servo position, torque, load, current (HLS), voltage and temperature |
-| `joints` | All 9 joints: model (`?` = not identified / mismatch), enabled, encoder, exo span, servo endpoints, travel, `vmax`/`amax`/`vsat`/`trk`, `ilimit` (`prot` = protection current), ready, state, last fault |
+| `status` | Armed count, last hand-level fault, one line per enabled or armed joint, global parameters. Each joint line shows state, exo, target, goal, sent goal, grip lead (`*` = contact), commanded speed (steps/s), and servo position, torque, load, current with the estimated supply current (HLS, `2700mA(~350 in)`), voltage and temperature |
+| `joints` | All 9 joints: model (`?` = not identified / mismatch), enabled, encoder, exo span, servo endpoints, travel, `vmax`/`amax`/`vsat`/`trk`, `ilimit/trip` (HLS: cap, `prot` = protection current / `itrip` %, `off`), ready, state, last fault |
 | `enc` | All encoder channels with state, AGC, magnet flags, errors and the joint each one drives |
 | `stats [reset]` | Loop jitter (max, p99), execution time, servo bus and encoder statistics, jump-guard rejections |
 | `monitor on\|off` | 10 Hz rows: 9 encoder angles and 9 servo positions, polling one servo per cycle. Disarmed only |
@@ -198,12 +214,13 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 | `set <j> exospan <rawA> <span>` / `set <j> servo <a> <b>` | Enter endpoints directly (the `dump` format; span in counts, multi-turn allowed). The old `set <j> exo <rawA> <rawB>` from earlier dumps still works for spans below half a turn |
 | `set <j> vmax\|amax\|vsat\|trk\|grip <n>` | Per-joint motion, tracking and grip parameters, in the servo's own steps. Allowed while armed |
 | `set <j> ilimit <mA>` | HLS goal-current cap, 0 = protection current. Allowed while armed (applied at once) |
+| `set <j> itrip <%>` | HLS over-current trip as % of the cap: 0 = off, 50–100, default 90. Allowed while armed; not saved |
 | `set lead\|mincut\|beta\|jump\|gripload <v>` | Global parameters. Allowed while armed |
 | `set loadtrip on\|off` | Firmware load trips (off = only the servo's overload protection decides) |
 | `sweep <j>` / `sweep <j> apply` | Measure speed and suggest `vmax`/`vsat` / apply the suggestion. `sweep <j>` is disarmed only |
 | `limits check` / `limits write <j\|all>` | Compare / sync the servos' angle-limit registers with the travel. Writes only differing values; power-cycle HLS servos afterwards. Disarmed only |
 | `save` / `load` / `defaults` / `dump` | Write NVS / reload / reset to defaults in RAM / print as commands |
-| `plot <j> on` / `plot off` | Teleplot at 50 Hz: `exo_deg exo_filt_deg target goal sent ref grip_lead present load speed_cmd`, plus `current_ma` on HLS joints |
+| `plot <j> on` / `plot off` | Teleplot at 50 Hz: `exo_deg exo_filt_deg target goal sent ref grip_lead present load speed_cmd`, plus `temp_c`, and on HLS joints `current_ma supply_est_ma current_pct` |
 
 ## Behaviour
 
@@ -254,7 +271,10 @@ The goal is written before torque on, which is safe whether or not an HLS3606 go
 1. **Models.** `ping` matches `config.h`. Change one id's model in `config.h` on purpose: boot reports the mismatch and `arm <j>` is refused.
 2. **HLS limits.** `arm <j>` on an HLS joint with 0/0 limits is refused with the reason. After `limits write <j>` and a power-cycle, `limits check` shows `ok`.
 3. **Follow.** After bring-up, arm each joint alone, then the whole hand. `stats`: jitter max < 0.5 ms; `|pos − sent|` normal.
-4. **Current.** `set <j> ilimit 500` on an HLS joint and squeeze a sponge: `status` shows the current settling near 500 mA. Block the finger with a higher `ilimit`: `over-current` switches off that joint only.
+4. **Current.**
+   - Units first (see *Choosing `ilimit`*): `current_ma × load / 100` must match the supply ammeter.
+   - `set <j> ilimit 1000` on an HLS joint and squeeze a sponge: `current_pct` settles near `gripload` (60 %) and the grasp holds ≥ 10 s without `over-current`.
+   - `set <j> grip 0` (limiter off) and block the finger: the current pegs the cap and `over-current` switches off that joint only after 0.2 s. Then restore `grip`.
 5. **SCS regression.** Joints 1, 3, 5 follow, grasp and stop on E-stop as before.
 
 ## M2 bench test (previous hand)
