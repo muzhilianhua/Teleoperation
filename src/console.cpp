@@ -73,6 +73,10 @@ void Console::textStep() {
   while (!hostMode_ && Serial.available() > 0) {
     const char c = static_cast<char>(Serial.read());
     if (c == '\r') continue;
+    if (c == '\0') {  // end of a host link frame sent to a text console: drop the line
+      lineLength_ = 0;
+      continue;
+    }
     if (c == '\n') {
       line_[lineLength_] = '\0';
       handleLine(line_);
