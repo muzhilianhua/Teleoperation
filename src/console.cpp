@@ -21,6 +21,11 @@ const char* encoderStateShort(AS5048BChannelState state) {
   return "?";
 }
 
+// Supply-side current of one servo: the H-bridge draws about phase current x
+// drive duty (the load register is the duty), so a servo stalled at a 3 A cap
+// may draw only a few hundred mA from the supply.
+float supplyEstimateMa(const ServoState& s) { return fabsf(s.currentMa) * fabsf(s.loadPct) / 100.0f; }
+
 int jointIndex(uint8_t servoId) {
   return teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
 }
@@ -116,6 +121,7 @@ void Console::printHelp() {
       "  set <j> exospan <rawA> <span> | servo <a> <b>  enter endpoints directly (dump format)\n"
       "  set <j> vmax|amax|vsat|trk|grip <n>        per-joint speed / tracking / grip lead (0 = off)\n"
       "  set <j> ilimit <mA>                        HLS goal-current cap (0 = servo protection current)\n"
+      "  set <j> itrip <%>                          HLS over-current trip, % of cap (0 = off; not saved)\n"
       "  set lead|mincut|beta|jump|gripload <v>     global parameters\n"
       "  set loadtrip on|off                        firmware load trips (off: servo overload decides)\n"
       "  save | load | defaults | dump              NVS store / reload / reset (RAM) / export\n"
@@ -141,8 +147,10 @@ void Console::printStatus() {
                   j.exoFilteredCounts * teleop::kDegreesPerCount, j.target, j.goal, j.sentGoal,
                   j.gripLead, j.contact ? "*" : " ", j.speed);
     if (j.readAgeMs <= config::kServoCommStaleMs) {
-      char current[24] = "";
-      if (j.servo.hasCurrent) snprintf(current, sizeof(current), " %5.0fmA", j.servo.currentMa);
+      char current[32] = "";
+      if (j.servo.hasCurrent) {
+        snprintf(current, sizeof(current), " %5.0fmA(~%.0f in)", j.servo.currentMa, supplyEstimateMa(j.servo));
+      }
       Serial.printf("  pos %4d tq %d load %5.1f%%%s %.1fV %dC%s\n", j.servo.position, j.servo.torqueOn,
                     j.servo.loadPct, current, j.servo.voltage, j.servo.temperatureC,
                     !j.homed ? "  HOME!" : (j.encFresh ? "" : "  ENC!"));
@@ -159,7 +167,7 @@ void Console::printStatus() {
 void Console::printJoints() {
   controller_.snapshot(snapshot_);
   Serial.println(
-      "id name           model on enc  exo span   servo A..B   travel     vmax  amax  vsat trk  ilimit "
+      "id name           model on enc  exo span   servo A..B   travel     vmax  amax  vsat trk  ilimit/trip "
       "ready home  state  last fault");
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     const teleop::JointDefaults& d = config::kJoints[i];
@@ -195,15 +203,25 @@ void Console::printJoints() {
     char model[8];
     snprintf(model, sizeof(model), "%s%s", d.model == feetech::ServoModel::Hls3606 ? "HLS" : "SCS",
              j.modelOk ? "" : "?");
-    char ilimit[8];
+    // HLS: goal-current cap (`prot` = servo protection current) / over-current trip %
+    char ilimit[16];
     if (d.model != feetech::ServoModel::Hls3606) {
       strlcpy(ilimit, "--", sizeof(ilimit));
-    } else if (s.currentLimitMa == 0) {
-      strlcpy(ilimit, "prot", sizeof(ilimit));
     } else {
-      snprintf(ilimit, sizeof(ilimit), "%u", s.currentLimitMa);
+      char cap[8], trip[8];
+      if (s.currentLimitMa == 0) {
+        strlcpy(cap, "prot", sizeof(cap));
+      } else {
+        snprintf(cap, sizeof(cap), "%u", s.currentLimitMa);
+      }
+      if (s.currentTripPct == 0) {
+        strlcpy(trip, "off", sizeof(trip));
+      } else {
+        snprintf(trip, sizeof(trip), "%u", s.currentTripPct);
+      }
+      snprintf(ilimit, sizeof(ilimit), "%s/%s", cap, trip);
     }
-    Serial.printf("%2u %-14s %-5s %d  %-4s %-9s  %s  %s %5u %5u %5u %4u  %-6s %-5s %s %-6s %s\n",
+    Serial.printf("%2u %-14s %-5s %d  %-4s %-9s  %s  %s %5u %5u %5u %4u  %-11s %-5s %s %-6s %s\n",
                   d.servoId, d.name, model, s.enabled, enc, exo, servo, travel, s.vmax, s.amax, s.vsat,
                   s.trackSteps, ilimit, j.ready ? "yes" : "no", home, jointStateToString(j.state),
                   j.lastFault == teleop::Fault::None ? "-" : teleop::faultToString(j.lastFault));
@@ -299,6 +317,10 @@ void Console::plot() {
   if (j.readAgeMs <= config::kServoCommStaleMs) {
     Serial.printf(">present:%d\n>load:%.1f\n>speed_cmd:%.0f\n", j.servo.position, j.servo.loadPct,
                   j.speed);
-    if (j.servo.hasCurrent) Serial.printf(">current_ma:%.0f\n", j.servo.currentMa);
+    Serial.printf(">temp_c:%d\n", j.servo.temperatureC);
+    if (j.servo.hasCurrent) {
+      Serial.printf(">current_ma:%.0f\n>supply_est_ma:%.0f\n", j.servo.currentMa, supplyEstimateMa(j.servo));
+      if (j.currentLimitMa > 0) Serial.printf(">current_pct:%.1f\n", 100.0f * fabsf(j.servo.currentMa) / j.currentLimitMa);
+    }
   }
 }
