@@ -220,6 +220,7 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 | `sweep <j>` / `sweep <j> apply` | Measure speed and suggest `vmax`/`vsat` / apply the suggestion. `sweep <j>` is disarmed only |
 | `limits check` / `limits write <j\|all>` | Compare / sync the servos' angle-limit registers with the travel. Writes only differing values; power-cycle HLS servos afterwards. Disarmed only |
 | `save` / `load` / `defaults` / `dump` | Write NVS / reload / reset to defaults in RAM / print as commands |
+| `host on` | Switch the port to the framed host link used by the PC GUI. The GUI sends this itself; a missed heartbeat returns to text. See [docs/host-protocol.md](docs/host-protocol.md) |
 | `plot <j> on` / `plot off` | Teleplot at 50 Hz: `exo_deg exo_filt_deg target goal sent ref grip_lead present load speed_cmd`, plus `temp_c`, and on HLS joints `current_ma supply_est_ma current_pct` |
 
 ## Behaviour
@@ -351,6 +352,7 @@ include/config.h          pins, bus, joint table (model, travel, vmax/vsat/amax)
 lib/AS5048B/              encoder driver (vendored, see below)
 lib/FeetechProtocol/      pure C++ packet codec and SCS0009 / HLS3606 model codecs (host-tested)
 lib/FeetechBus/           UART transport, ServoBus interface, FeetechMixedBus (per-id models)
+lib/HostLink/             pure C++ host link: COBS framing, CRC16, wire message layouts (host-tested)
 lib/TeleopCore/           pure C++, host-tested:
   joint_map / joint_config  mapping, per-joint settings, validation
   config_blob               NVS serialization (CRC32, version 4, per-joint model)
@@ -362,7 +364,10 @@ lib/TeleopCore/           pure C++, host-tested:
   jump_guard / one_euro / rate_limiter
 src/control_task.*        100 Hz loop on core 1: per-joint states, reads, arming, sweep, settings
 src/config_store.*        Preferences (NVS) read/write
-src/console.*             USB console on core 0
+src/console.*             USB console on core 0: text commands, or the framed host link after `host on`
+src/console_out.*         console output sink (text, or LOG frames in host mode)
+src/host_telemetry.*      snapshot -> HELLO / TELEMETRY / SLOW_STATUS wire structs
+docs/host-protocol.md     host link protocol v1
 src/main.cpp              setup and task start
 test/                     Unity tests (native): packet, models, core, config, sweep, tracker
 tools/measure_mapping.py  mapping consistency measurement (host Python)
