@@ -36,7 +36,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config_files import BackupStore
+from .config_files import BackupStore, extract_dump
 from .device import CommandResult, Device
 from .link.discovery import find_esp32, list_serial_ports
 from .link.link import LinkStatus
@@ -206,6 +206,12 @@ class BackupRequest(BaseModel):
     note: str = ""
 
 
+class ImportRequest(BaseModel):
+    text: str
+    tag: str = "imported"
+    note: str = ""
+
+
 class RestoreRequest(BaseModel):
     save: bool = True
     force: bool = False
@@ -303,6 +309,14 @@ def create_app(
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         b = store.save(dump, req.tag, req.note, device.status.port)
+        return {"name": b.name, "saved": b.saved, "tag": b.tag, "note": b.note}
+
+    @api.post("/backups/import")
+    def import_backup(req: ImportRequest) -> dict[str, Any]:
+        dump = extract_dump(req.text.splitlines())
+        if dump is None:
+            raise HTTPException(400, "no complete dump (`defaults` ... `# end of dump`) in the text")
+        b = store.save(dump, req.tag, req.note, "pasted text")
         return {"name": b.name, "saved": b.saved, "tag": b.tag, "note": b.note}
 
     @api.post("/backups/{name}/diff")

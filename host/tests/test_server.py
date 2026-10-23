@@ -72,3 +72,7 @@ def test_backup_endpoints(client: TestClient) -> None:
     assert restored["ok"], restored["message"]
     assert client.post(f"/api/backups/{name}/diff").json()["changes"] == []
     assert client.get("/api/backups/nope.txt").status_code == 404
+    pasted = "noise\n" + "\n".join(client.get(f"/api/backups/{name}").json()["dump"]) + "\n"
+    imported = client.post("/api/backups/import", json={"text": pasted, "tag": "paste"}).json()
+    assert imported["tag"] == "paste"
+    assert client.post("/api/backups/import", json={"text": "set 1 on"}).status_code == 400
