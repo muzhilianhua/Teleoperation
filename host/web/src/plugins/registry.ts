@@ -13,6 +13,7 @@ export interface PageDef {
 
 export const corePages: PageDef[] = [
   { id: 'dashboard', title: 'Dashboard', group: 'Operate', load: () => import('../pages/Dashboard.svelte') },
+  { id: 'calibration', title: 'Calibration', group: 'Setup', load: () => import('../pages/Calibration.svelte') },
   { id: 'console', title: 'Console', group: 'Diagnose', load: () => import('../pages/Console.svelte') },
 ];
 
