@@ -39,10 +39,14 @@ void Console::startTask() {
 void Console::taskEntry(void* arg) { static_cast<Console*>(arg)->run(); }
 
 void Console::drainMessages() {
-  char text[160];
-  while (controller_.popMessage(text, sizeof(text))) {
+  hostlink::Event event;
+  while (controller_.popEvent(event)) {
     Serial.print("[ctl] ");
-    Serial.println(text);
+    Serial.println(event.text);
+  }
+  // Text-mode commands carry no seq, so there are no completions to report.
+  Completion done;
+  while (controller_.popCompletion(done)) {
   }
 }
 

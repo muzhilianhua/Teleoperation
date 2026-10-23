@@ -11,10 +11,12 @@
 #pragma once
 
 #include <Arduino.h>
+#include <stdarg.h>
 #include <AS5048BGroup.h>
 #include <command_parser.h>
 #include <feetech_port.h>
 #include <grip_limiter.h>
+#include <host_messages.h>
 #include <joint_config.h>
 #include <exo_tracker.h>
 #include <one_euro.h>
@@ -30,6 +32,13 @@ enum class JointState : uint8_t { Off, Align, Follow, Hold, Sweep };
 const char* jointStateToString(JointState state);
 
 using Command = teleop::ParsedCommand;
+
+// Reply to a command posted with a host sequence number: sent after every
+// event it raised, so the host knows the command is finished.
+struct Completion {
+  uint16_t seq;
+  bool ok;  // false: refused, rejected or failed
+};
 
 struct TimingStats {
   static constexpr uint16_t kBinUs = 10;
@@ -92,6 +101,7 @@ struct Snapshot {
   uint8_t armedCount = 0;
   teleop::Fault lastHandFault = teleop::Fault::None;
   bool torqueOffConfirmed = true;
+  uint32_t droppedEvents = 0;  // events lost to a full queue
   bool echo = false;
   bool monitor = false;
   teleop::GlobalSettings global;
@@ -114,14 +124,28 @@ class TeleopController {
   void startTask();
 
   // Blocks up to `wait` when the queue is full (pasted dumps arrive in bursts).
-  bool post(const Command& command, TickType_t wait);
+  // seq != 0 (host link): events carry it and a Completion follows them.
+  bool post(const Command& command, TickType_t wait, uint16_t seq = 0);
+  // Same path as the BOOT button: torque off on the next control cycle.
+  void requestEstop();
   void snapshot(Snapshot& out);
-  // Event text for the console; returns false when the queue is empty.
-  bool popMessage(char* buffer, size_t length);
+  // Returns false when the queue is empty. Drain events before taking a
+  // completion and again before reporting it: its events were queued first.
+  bool popEvent(hostlink::Event& event);
+  bool popCompletion(Completion& completion);
 
  private:
-  struct Message {
-    char text[160];
+  struct QueuedCommand {
+    Command command;
+    uint16_t seq;
+  };
+
+  // What an event means to the host; the text is what the console prints.
+  struct EventTag {
+    hostlink::EventCode code = hostlink::EventCode::Generic;
+    uint8_t joint = 0;  // servo id, 0 = none
+    hostlink::Severity severity = hostlink::Severity::Info;
+    int32_t args[4] = {0, 0, 0, 0};
   };
 
   struct JointChannel {
@@ -216,7 +240,11 @@ class TeleopController {
   float effectiveCurrentMa(const JointChannel& ch) const;
   void applyGoalCurrent(JointChannel& ch);
   void publish();
+  void postEvent(const EventTag& tag, const char* format, va_list args);
   void message(const char* format, ...) __attribute__((format(printf, 2, 3)));
+  void event(const EventTag& tag, const char* format, ...) __attribute__((format(printf, 3, 4)));
+  // A refusal / failure of the command being handled: its Completion reports failure.
+  void refuse(const char* format, ...) __attribute__((format(printf, 2, 3)));
 
   static TeleopController* instance_;
 
@@ -226,6 +254,10 @@ class TeleopController {
 
   QueueHandle_t commands_ = nullptr;
   QueueHandle_t messages_ = nullptr;
+  QueueHandle_t completions_ = nullptr;
+  uint16_t currentSeq_ = 0;  // command being handled (control task only)
+  bool cmdFailed_ = false;
+  volatile uint32_t droppedEvents_ = 0;
   TaskHandle_t task_ = nullptr;
   portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
   Snapshot staging_;
