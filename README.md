@@ -30,6 +30,17 @@ Design document: <https://claude.ai/artifact/81sxWeamYJnzXBLv281o2v>
 
 > Only one master may drive the servo bus. Close the servo_bringup tools while the ESP32 is connected.
 
+## PC GUI (`host/`)
+
+Everything below can also be done from a browser GUI on the debug computer: calibration, telemetry plots, servo setup, parameters, backups, arming and E-stop. Close `pio device monitor` first:
+
+```bash
+cd host && uv sync && uv run teleop-host      # opens http://127.0.0.1:8790
+uv run teleop-host --sim                      # without hardware
+```
+
+See [host/README.md](host/README.md). The GUI uses the host link protocol ([docs/host-protocol.md](docs/host-protocol.md)) on the same USB port; the text console below stays available whenever the GUI is not connected.
+
 ## Build, test, flash
 
 ```bash
@@ -99,7 +110,7 @@ Run every step disarmed. Settings live in RAM until `save`.
    A ↔ A and B ↔ B sets the direction. Between `cal a` and `cal b`, move the joint continuously; the encoder may turn any number of times (up to 3). If tracking is interrupted (encoder dropout), `cal b` is refused; redo `cal a`.
 5. Check `joints` shows `ready yes`. Then `save`. Back up with `tools/calib.py backup` (see below), or copy the `dump` output: pasting it back, then `save`, restores everything.
 
-### Backup and restore (`tools/calib.py`)
+### Backup and restore (`tools/calib.py`, or the GUI's Config store page)
 
 NVS keeps one set of settings per ESP32. To keep calibrations in files (per operator, in git) and move them between boards, use the host tool. Close `pio device monitor` first; the port is found automatically (or pass `--port`).
 
@@ -371,7 +382,8 @@ docs/host-protocol.md     host link protocol v1
 src/main.cpp              setup and task start
 test/                     Unity tests (native): packet, models, core, config, sweep, tracker
 tools/measure_mapping.py  mapping consistency measurement (host Python)
-tools/calib.py            calibration backup / diff / restore over the console
+tools/calib.py            calibration backup / diff / restore over the text console (the GUI's Config store does the same)
+host/                     PC GUI: teleop-host (Python, FastAPI) + web UI (Svelte), see host/README.md
 calib/                    calibration backups written by tools/calib.py
 ```
 
