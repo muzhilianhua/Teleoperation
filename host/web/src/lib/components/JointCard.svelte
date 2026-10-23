@@ -19,15 +19,11 @@
 <div class="card panel" class:armed class:disabled={!enabled}>
   <div class="head">
     <span class="id num">{joint.info.servo_id}</span>
-    <span class="name">{joint.info.name}</span>
+    <span class="name" title={joint.info.name}>{joint.info.name}</span>
     <span class="pill">{modelShort(joint.info.model)}</span>
     <span class="spacer"></span>
-    <span class="pill {STATE_CLASS[t?.state ?? 0]}">{stateName(t?.state)}</span>
+    <span class="state pill {STATE_CLASS[t?.state ?? 0]}">{stateName(t?.state)}</span>
   </div>
-
-  {#if t && t.fault}
-    <div class="fault">last off: {faultName(t.fault)}</div>
-  {/if}
 
   <div class="values">
     <div><span class="k">exo</span><span class="num">{fmt(exoDeg(app.info, t?.exo_filtered_counts ?? NaN), 1)}°</span></div>
@@ -57,11 +53,15 @@
 
   <div class="flags">
     <span class="pill {has(flags, JointFlag.READY) ? 'ok' : ''}">{has(flags, JointFlag.READY) ? 'ready' : 'not ready'}</span>
-    {#if multiTurnUnhomed}<span class="pill err">HOME!</span>{/if}
-    {#if !has(flags, JointFlag.ENC_FRESH) && s && s.encoder_index !== 255}<span class="pill warn">ENC!</span>{/if}
-    {#if has(flags, JointFlag.CONTACT)}<span class="pill info">contact</span>{/if}
-    {#if !has(flags, JointFlag.MODEL_OK)}<span class="pill err">model?</span>{/if}
-    {#if has(flags, JointFlag.TORQUE_ON)}<span class="pill warn">torque</span>{/if}
+    <span class="pill err" class:inactive={!multiTurnUnhomed}>HOME!</span>
+    <span class="pill warn" class:inactive={has(flags, JointFlag.ENC_FRESH) || !s || s.encoder_index === 255}>ENC!</span>
+    <span class="pill info" class:inactive={!has(flags, JointFlag.CONTACT)}>contact</span>
+    <span class="pill err" class:inactive={has(flags, JointFlag.MODEL_OK)}>model?</span>
+    <span class="pill warn" class:inactive={!has(flags, JointFlag.TORQUE_ON)}>torque</span>
+  </div>
+
+  <div class="fault" role="status">
+    {#if t && t.fault}last off: {faultName(t.fault)}{/if}
   </div>
 
   <div class="actions row">
@@ -84,6 +84,7 @@
     flex-direction: column;
     gap: 8px;
     padding: 12px;
+    min-width: 0;
   }
   .card.armed {
     border-color: var(--ok);
@@ -104,6 +105,15 @@
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .head .pill {
+    flex-shrink: 0;
+  }
+  .state {
+    min-width: calc(6ch + 18px);
+    justify-content: center;
   }
   .spacer {
     flex: 1;
@@ -111,24 +121,50 @@
   .fault {
     color: var(--err);
     font-size: 12px;
+    /* Keep two lines even without a fault; longer firmware text stays readable by scrolling. */
+    height: 2.9em;
+    flex-shrink: 0;
+    overflow: auto;
+    overflow-wrap: anywhere;
   }
   .values {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 2px 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 10px;
   }
-  .values div {
+  .values > div {
     display: flex;
-    justify-content: space-between;
-    gap: 4px;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .values .num {
+    /* Signed int16 current plus " mA" occupies at most nine monospace characters. */
+    min-width: 9ch;
+    align-self: flex-end;
+    text-align: right;
+    white-space: nowrap;
   }
   .k {
     color: var(--muted);
     font-size: 12px;
   }
   .flags {
-    display: flex;
+    /* Inactive slots reserve space without exposing absent warnings to assistive technology. */
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 4px;
-    flex-wrap: wrap;
+  }
+  .flags .pill {
+    justify-content: center;
+  }
+  .inactive {
+    visibility: hidden;
+  }
+  .actions {
+    margin-top: auto;
+    flex-wrap: nowrap;
+  }
+  .actions button {
+    min-width: 80px;
   }
 </style>
