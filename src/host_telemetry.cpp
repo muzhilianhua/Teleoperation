@@ -2,7 +2,23 @@
 
 #include <math.h>
 
+#ifndef FW_GIT_REV
+#define FW_GIT_REV __DATE__ " " __TIME__
+#endif
+
 namespace {
+
+// Index = hostlink::EventCode.
+const char* const kEventNames[] = {"generic",    "refused",      "armed",        "disarmed",   "torque_off",
+                                   "fault",      "joint_state",  "cal_captured", "homed",      "ping_result",
+                                   "limits_row", "sweep_run",    "sweep_done",   "config_saved", "config_loaded",
+                                   "defaults",   "setting_changed", "monitor"};
+static_assert(sizeof(kEventNames) / sizeof(kEventNames[0]) == static_cast<size_t>(hostlink::EventCode::Count),
+              "one name per event code");
+
+constexpr uint8_t kFaultCount = static_cast<uint8_t>(teleop::Fault::OverCurrent) + 1;
+constexpr uint8_t kStateCount = static_cast<uint8_t>(JointState::Sweep) + 1;
+constexpr uint8_t kModelCount = static_cast<uint8_t>(feetech::ServoModel::Hls3606) + 1;
 
 int16_t toI16(float v) {
   const float r = roundf(v);
@@ -34,6 +50,56 @@ uint16_t jointFlags(const JointSnapshot& j) {
 }
 
 }  // namespace
+
+const hostlink::DeviceInfo& deviceInfo() {
+  static hostlink::JointInfo joints[teleop::kMaxJoints];
+  static const char* faults[kFaultCount];
+  static const char* states[kStateCount];
+  static const char* models[kModelCount];
+  static hostlink::DeviceInfo info;
+  static bool built = false;
+  if (built) return info;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+    const teleop::JointDefaults& d = config::kJoints[i];
+    const feetech::ModelInfo& m = feetech::modelInfo(d.model);
+    hostlink::JointInfo& j = joints[i];
+    j.servoId = d.servoId;
+    j.model = static_cast<uint8_t>(d.model);
+    j.travelMin = d.travelMin;
+    j.travelMax = d.travelMax;
+    j.vmax = d.vmax;
+    j.vsat = d.vsat;
+    j.amax = d.amax;
+    j.maxSpeed = toU16(m.maxSpeedRegister * m.stepsPerSpeedUnit);
+    j.encoderDefault = d.encoderIndex;
+    j.enabledDefault = d.enabled ? 1 : 0;
+    j.stepScale = teleop::stepScale(d);
+    j.degreesPerStep = (300.0f / 1024.0f) / j.stepScale;  // SCS0009: ~300 deg over 1024 steps
+    j.name = d.name;
+  }
+  for (uint8_t i = 0; i < kFaultCount; ++i) faults[i] = teleop::faultToString(static_cast<teleop::Fault>(i));
+  for (uint8_t i = 0; i < kStateCount; ++i) states[i] = jointStateToString(static_cast<JointState>(i));
+  for (uint8_t i = 0; i < kModelCount; ++i) models[i] = feetech::modelName(static_cast<feetech::ServoModel>(i));
+  info.firmware = FW_GIT_REV;
+  info.controlHz = config::kControlHz;
+  info.degreesPerCount = teleop::kDegreesPerCount;
+  info.encoderCount = config::kEncoderCount;
+  info.minCurrentLimitMa = teleop::kMinCurrentLimitMa;
+  info.maxCurrentLimitMa = teleop::kMaxCurrentLimitMa;
+  info.minCurrentTripPct = teleop::kMinCurrentTripPct;
+  info.maxCurrentTripPct = teleop::kMaxCurrentTripPct;
+  info.defaultCurrentTripPct = teleop::kDefaultCurrentTripPct;
+  info.minExoSpanCounts = teleop::kMinExoSpanCounts;
+  info.maxExoSpanCounts = teleop::kMaxExoSpanCounts;
+  info.joints = joints;
+  info.jointCount = teleop::kMaxJoints;
+  info.faults = {faults, kFaultCount};
+  info.states = {states, kStateCount};
+  info.events = {kEventNames, static_cast<uint8_t>(hostlink::EventCode::Count)};
+  info.models = {models, kModelCount};
+  built = true;
+  return info;
+}
 
 void fillTelemetry(const Snapshot& s, hostlink::Telemetry& out) {
   static_assert(teleop::kMaxJoints <= hostlink::kMaxJoints, "joint table larger than the wire format");

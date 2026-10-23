@@ -37,6 +37,10 @@ Console console(controller);
 
 void setup() {
   Serial.setRxBufferSize(4096);  // a pasted `dump` (~1.5 KB) must not overflow
+  // Host link: ~50 KB/s of frames. A short timeout bounds how long a write
+  // can stall the console when nobody reads the port.
+  Serial.setTxBufferSize(4096);
+  Serial.setTxTimeoutMs(20);
   Serial.begin(115200);
   const uint32_t waitStart = millis();
   while (!Serial && millis() - waitStart < 1500) delay(10);

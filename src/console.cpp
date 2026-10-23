@@ -2,13 +2,19 @@
 
 #include <command_parser.h>
 
+#include "host_telemetry.h"
+
 using teleop::Verb;
+using hostlink::MsgType;
 
 namespace {
 
 constexpr uint32_t kPollMs = 5;
 constexpr uint32_t kPlotPeriodMs = 20;  // 50 Hz Teleplot
 constexpr TickType_t kPostWait = pdMS_TO_TICKS(200);
+constexpr TickType_t kTelemetryWait = pdMS_TO_TICKS(2);  // host mode loop period at most
+constexpr uint16_t kMinHeartbeatTimeoutMs = 200;
+constexpr uint16_t kMaxHeartbeatTimeoutMs = 10000;
 
 char dumpBuffer[3072];
 
@@ -54,31 +60,40 @@ void Console::run() {
   out_.println();
   out_.println("Teleoperation M2 ready. Type `help`.");
   for (;;) {
-    drainMessages();
-    while (Serial.available() > 0) {
-      const char c = static_cast<char>(Serial.read());
-      if (c == '\r') continue;
-      if (c == '\n') {
-        line_[lineLength_] = '\0';
-        handleLine(line_);
-        lineLength_ = 0;
-        drainMessages();  // keep replies in step with pasted multi-line input
-      } else if (lineLength_ + 1 < sizeof(line_)) {
-        line_[lineLength_++] = c;
-      }
+    if (hostMode_) {
+      hostStep();
+    } else {
+      textStep();
     }
-    const uint32_t now = millis();
-    if (plotJoint_ != 0 && now - lastPlotMs_ >= kPlotPeriodMs) {
-      lastPlotMs_ = now;
-      plot();
-    }
-    if (now - lastMonitorMs_ >= config::kMonitorPeriodMs) {
-      lastMonitorMs_ = now;
-      controller_.snapshot(snapshot_);
-      if (snapshot_.monitor) printMonitorRow();
-    }
-    vTaskDelay(pdMS_TO_TICKS(kPollMs));
   }
+}
+
+void Console::textStep() {
+  drainMessages();
+  while (!hostMode_ && Serial.available() > 0) {
+    const char c = static_cast<char>(Serial.read());
+    if (c == '\r') continue;
+    if (c == '\n') {
+      line_[lineLength_] = '\0';
+      handleLine(line_);
+      lineLength_ = 0;
+      if (!hostMode_) drainMessages();  // keep replies in step with pasted multi-line input
+    } else if (lineLength_ + 1 < sizeof(line_)) {
+      line_[lineLength_++] = c;
+    }
+  }
+  if (hostMode_) return;
+  const uint32_t now = millis();
+  if (plotJoint_ != 0 && now - lastPlotMs_ >= kPlotPeriodMs) {
+    lastPlotMs_ = now;
+    plot();
+  }
+  if (now - lastMonitorMs_ >= config::kMonitorPeriodMs) {
+    lastMonitorMs_ = now;
+    controller_.snapshot(snapshot_);
+    if (snapshot_.monitor) printMonitorRow();
+  }
+  vTaskDelay(pdMS_TO_TICKS(kPollMs));
 }
 
 void Console::handleLine(const char* line) {
@@ -88,28 +103,275 @@ void Console::handleLine(const char* line) {
     out_.printf("error: %s\n", error);
     return;
   }
+  if (cmd.verb == Verb::Host) {
+    if (cmd.flag) {
+      enterHostMode();
+    } else {
+      out_.println("host link is not active");
+    }
+    return;
+  }
+  if (runLocal(cmd)) return;
+  if (!controller_.post(cmd, kPostWait)) out_.println("error: control task busy, command dropped");
+}
+
+bool Console::runLocal(const teleop::ParsedCommand& cmd) {
   switch (cmd.verb) {
     case Verb::None:
-    case Verb::Comment: return;
-    case Verb::Help: printHelp(); return;
-    case Verb::Status: printStatus(); return;
-    case Verb::Stats: printStats(); return;
-    case Verb::Enc: printEncoders(); return;
-    case Verb::Joints: printJoints(); return;
-    case Verb::Dump: printDump(); return;
-    case Verb::Host: out_.println("error: host link not available in this build"); return;
+    case Verb::Comment: return true;
+    case Verb::Help: printHelp(); return true;
+    case Verb::Status: printStatus(); return true;
+    case Verb::Stats: printStats(); return true;
+    case Verb::Enc: printEncoders(); return true;
+    case Verb::Joints: printJoints(); return true;
+    case Verb::Dump: printDump(); return true;
     case Verb::Plot:
       if (cmd.flag && jointIndex(cmd.joint) < 0) {
         out_.printf("error: no joint with servo id %u\n", cmd.joint);
-        return;
+        return true;
       }
       plotJoint_ = cmd.flag ? cmd.joint : 0;
       out_.printf("plot %s\n", plotJoint_ ? "on" : "off");
-      return;
-    default:
-      if (!controller_.post(cmd, kPostWait)) out_.println("error: control task busy, command dropped");
-      return;
+      return true;
+    default: return false;
   }
+}
+
+// ---- host link -----------------------------------------------------------------
+
+void Console::logSink(void* context, const char* line, size_t length) {
+  Console& c = *static_cast<Console*>(context);
+  const size_t n = hostlink::encodeLog(hostlink::LogSource::Console, line, length, c.logPayload_,
+                                       sizeof(c.logPayload_));
+  if (n > 0) c.sendFrame(MsgType::Log, c.txSeq_++, c.logPayload_, n);
+}
+
+void Console::enterHostMode() {
+  // Defaults until HOST_HELLO: no telemetry yet, 1 s heartbeat timeout.
+  hostConfig_ = hostlink::HostHello();
+  hostConfig_.telemetryDivider = 0;
+  hostConfig_.slowDivider = 0;
+  reader_.reset();
+  plotJoint_ = 0;
+  hostMode_ = true;
+  lastRxMs_ = millis();
+  out_.setLineSink(logSink, this);
+  sendHello();
+}
+
+void Console::exitHostMode(hostlink::ByeReason reason) {
+  const uint8_t bye = static_cast<uint8_t>(reason);
+  sendFrame(MsgType::Bye, txSeq_++, &bye, 1);
+  controller_.setTelemetryStream(false);
+  out_.setLineSink(nullptr, nullptr);
+  hostMode_ = false;
+  lineLength_ = 0;
+  if (reason == hostlink::ByeReason::HeartbeatTimeout) {
+    controller_.snapshot(snapshot_);
+    const bool stop = (hostConfig_.flags & hostlink::kHelloEstopOnLinkLoss) && snapshot_.armedCount > 0;
+    if (stop) controller_.requestEstop("host link lost");
+    out_.printf("[host] link lost%s, text console\n", stop ? ", torque off" : "");
+  } else {
+    out_.println("[host] link closed, text console");
+  }
+}
+
+void Console::hostStep() {
+  while (hostMode_ && Serial.available() > 0) {
+    if (reader_.feed(static_cast<uint8_t>(Serial.read())) == hostlink::FrameReader::Result::Frame) {
+      lastRxMs_ = millis();
+      handleFrame(reader_.header(), reader_.payload(), reader_.payloadLength());
+    }
+  }
+  if (!hostMode_) return;
+  drainHostEvents();
+
+  // Paced by the control loop: wait for the next sample, then send what is queued.
+  if (controller_.popTelemetry(sample_, kTelemetryWait)) {
+    do {
+      sendTelemetry(sample_);
+    } while (controller_.popTelemetry(sample_, 0));
+  }
+
+  const uint32_t now = millis();
+  const uint32_t slowPeriodMs = hostConfig_.slowDivider * (1000 / config::kControlHz);
+  if (slowPeriodMs > 0 && now - lastSlowMs_ >= slowPeriodMs) {
+    lastSlowMs_ = now;
+    sendSlowStatus();
+  }
+  if (now - lastRxMs_ > hostConfig_.heartbeatTimeoutMs) exitHostMode(hostlink::ByeReason::HeartbeatTimeout);
+}
+
+void Console::handleFrame(const hostlink::FrameHeader& header, const uint8_t* payload, size_t length) {
+  const bool reply = header.flags & hostlink::kFlagReplyExpected;
+  switch (static_cast<MsgType>(header.type)) {
+    case MsgType::Heartbeat:
+      if (reply) sendAck(header.seq, hostlink::AckStatus::Accepted);
+      return;
+    case MsgType::Estop:
+      // Ahead of anything queued: the control task acts on its next cycle.
+      controller_.requestEstop("E-stop (host)");
+      sendAck(header.seq, hostlink::AckStatus::Accepted);
+      return;
+    case MsgType::HostHello: {
+      hostlink::HostHello h;
+      if (!hostlink::decodeHostHello(payload, length, h) || h.protocol != hostlink::kProtocolVersion) {
+        sendAck(header.seq, hostlink::AckStatus::BadFrame, "unsupported protocol version");
+        return;
+      }
+      h.heartbeatTimeoutMs = constrain(h.heartbeatTimeoutMs, kMinHeartbeatTimeoutMs, kMaxHeartbeatTimeoutMs);
+      hostConfig_ = h;
+      controller_.setTelemetryStream(h.telemetryDivider > 0);
+      sendAck(header.seq, hostlink::AckStatus::Accepted);
+      return;
+    }
+    case MsgType::TelemConfig: {
+      hostlink::TelemConfig c;
+      if (!hostlink::decodeTelemConfig(payload, length, c)) {
+        sendAck(header.seq, hostlink::AckStatus::BadFrame, "bad TELEM_CONFIG");
+        return;
+      }
+      hostConfig_.telemetryDivider = c.telemetryDivider;
+      hostConfig_.slowDivider = c.slowDivider;
+      controller_.setTelemetryStream(c.telemetryDivider > 0);
+      sendAck(header.seq, hostlink::AckStatus::Accepted);
+      return;
+    }
+    case MsgType::GetInfo: sendHello(); return;
+    case MsgType::Command: handleHostCommand(header.seq, payload, length); return;
+    case MsgType::HostExit:
+      sendAck(header.seq, hostlink::AckStatus::Accepted);
+      exitHostMode(hostlink::ByeReason::HostExit);
+      return;
+    default: sendAck(header.seq, hostlink::AckStatus::BadFrame, "unknown frame type"); return;
+  }
+}
+
+// ACK says the line parsed and was queued (or why not); DONE follows once it
+// has run, after every event it raised. Console-only verbs answer at once:
+// their printed lines arrive as LOG frames, `dump` as one CONFIG frame.
+void Console::handleHostCommand(uint16_t seq, const uint8_t* text, size_t length) {
+  char line[sizeof(line_)];
+  if (length >= sizeof(line)) {
+    sendAck(seq, hostlink::AckStatus::ParseError, "command longer than 127 characters");
+    return;
+  }
+  memcpy(line, text, length);
+  line[length] = '\0';
+  teleop::ParsedCommand cmd;
+  const char* error = teleop::parseCommand(line, cmd);
+  if (error != nullptr) {
+    sendAck(seq, hostlink::AckStatus::ParseError, error);
+    return;
+  }
+  switch (cmd.verb) {
+    case Verb::Host:
+      sendAck(seq, hostlink::AckStatus::Accepted);
+      sendDone(seq, true);
+      if (!cmd.flag) exitHostMode(hostlink::ByeReason::HostExit);
+      return;
+    case Verb::Plot:
+      sendAck(seq, hostlink::AckStatus::Accepted);
+      out_.println("plot: Teleplot output is not available on the host link; use the GUI plots");
+      sendDone(seq, true);
+      return;
+    case Verb::Dump: {
+      sendAck(seq, hostlink::AckStatus::Accepted);
+      // Commands that finished just before may not be in the snapshot yet:
+      // wait for the next published cycle.
+      controller_.snapshot(snapshot_);
+      const uint32_t cycle = snapshot_.cycle;
+      for (int i = 0; i < 5 && snapshot_.cycle == cycle; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+        controller_.snapshot(snapshot_);
+      }
+      const bool ok = formatDumpText();
+      if (ok) {
+        const size_t n = hostlink::encodeConfig(seq, hostlink::ConfigFormat::DumpText, dumpBuffer, payload_,
+                                                sizeof(payload_));
+        sendFrame(MsgType::Config, txSeq_++, payload_, n);
+      } else {
+        out_.println("error: dump buffer too small");
+      }
+      sendDone(seq, ok);
+      return;
+    }
+    default: break;
+  }
+  if (runLocal(cmd)) {
+    sendAck(seq, hostlink::AckStatus::Accepted);
+    sendDone(seq, true);
+    return;
+  }
+  if (!controller_.post(cmd, kPostWait, seq)) {
+    sendAck(seq, hostlink::AckStatus::Busy, "control task busy, command dropped");
+    return;
+  }
+  sendAck(seq, hostlink::AckStatus::Accepted);
+}
+
+void Console::drainHostEvents() {
+  hostlink::Event event;
+  const auto drainEvents = [&]() {
+    while (controller_.popEvent(event)) {
+      const size_t n = hostlink::encodeEvent(event, payload_, sizeof(payload_));
+      sendFrame(MsgType::Event, txSeq_++, payload_, n);
+    }
+  };
+  drainEvents();
+  Completion done;
+  while (controller_.popCompletion(done)) {
+    drainEvents();  // its events were queued before it
+    sendDone(done.seq, done.ok);
+  }
+}
+
+void Console::sendTelemetry(const TelemetrySample& sample) {
+  const uint32_t cycle = sample.bytes[0] | (sample.bytes[1] << 8) | (sample.bytes[2] << 16) |
+                         (static_cast<uint32_t>(sample.bytes[3]) << 24);
+  const uint8_t divider = hostConfig_.telemetryDivider;
+  if (divider == 0 || cycle % divider != 0) return;
+  sendFrame(MsgType::Telemetry, txSeq_++, sample.bytes, sample.length, true);
+}
+
+void Console::sendSlowStatus() {
+  controller_.snapshot(snapshot_);
+  fillSlowStatus(snapshot_, slow_);
+  slow_.droppedTelemetry += droppedTx_;
+  slow_.rxCrcErrors = reader_.stats().crcErrors;
+  slow_.rxMalformed = reader_.stats().malformed + reader_.stats().overflows;
+  const size_t n = hostlink::encodeSlowStatus(slow_, payload_, sizeof(payload_));
+  sendFrame(MsgType::SlowStatus, txSeq_++, payload_, n, true);
+}
+
+void Console::sendHello() {
+  const size_t n = hostlink::encodeHello(deviceInfo(), payload_, sizeof(payload_));
+  sendFrame(MsgType::Hello, txSeq_++, payload_, n);
+}
+
+void Console::sendAck(uint16_t seq, hostlink::AckStatus status, const char* text) {
+  uint8_t buf[160];
+  const size_t n = hostlink::encodeAck(seq, status, text, buf, sizeof(buf));
+  sendFrame(MsgType::Ack, txSeq_++, buf, n);
+}
+
+void Console::sendDone(uint16_t seq, bool ok) {
+  uint8_t buf[4];
+  const size_t n = hostlink::encodeDone(seq, ok, buf, sizeof(buf));
+  sendFrame(MsgType::Done, txSeq_++, buf, n);
+}
+
+bool Console::sendFrame(MsgType type, uint16_t seq, const uint8_t* payload, size_t length, bool optional) {
+  hostlink::FrameHeader header;
+  header.type = static_cast<uint8_t>(type);
+  header.seq = seq;
+  const size_t n = hostlink::encodeFrame(header, payload, length, wire_, sizeof(wire_));
+  if (n == 0) return false;
+  if (optional && Serial.availableForWrite() < static_cast<int>(n)) {
+    ++droppedTx_;
+    return false;
+  }
+  return Serial.write(wire_, n) == n;
 }
 
 void Console::printHelp() {
@@ -132,7 +394,8 @@ void Console::printHelp() {
       "  save | load | defaults | dump              NVS store / reload / reset (RAM) / export\n"
       "  limits check | limits write <j|all>        servo angle-limit registers vs travel (disarmed)\n"
       "  sweep <j> | sweep <j> apply                measure saturation speed, suggest vmax/vsat (disarmed)\n"
-      "  plot <j> on | plot off                     Teleplot traces at 50 Hz");
+      "  plot <j> on | plot off                     Teleplot traces at 50 Hz\n"
+      "  host on                                    framed link for the PC GUI (it sends this itself)");
 }
 
 void Console::printStatus() {
@@ -276,15 +539,19 @@ void Console::printEncoders() {
 
 void Console::printDump() {
   controller_.snapshot(snapshot_);
-  teleop::JointSettings joints[teleop::kMaxJoints];
-  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) joints[i] = snapshot_.joints[i].settings;
-  const size_t n = teleop::formatDump(joints, config::kJoints, teleop::kMaxJoints, snapshot_.global,
-                                      dumpBuffer, sizeof(dumpBuffer));
-  if (n == 0) {
+  if (!formatDumpText()) {
     out_.println("error: dump buffer too small");
     return;
   }
   out_.print(dumpBuffer);
+}
+
+bool Console::formatDumpText() {
+  // Uses snapshot_ as the caller left it.
+  teleop::JointSettings joints[teleop::kMaxJoints];
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) joints[i] = snapshot_.joints[i].settings;
+  return teleop::formatDump(joints, config::kJoints, teleop::kMaxJoints, snapshot_.global, dumpBuffer,
+                            sizeof(dumpBuffer)) > 0;
 }
 
 void Console::printMonitorRow() {

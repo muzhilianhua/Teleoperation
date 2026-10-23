@@ -108,7 +108,10 @@ bool TeleopController::post(const Command& command, TickType_t wait, uint16_t se
   return xQueueSend(commands_, &queued, wait) == pdTRUE;
 }
 
-void TeleopController::requestEstop() { estopRequested_ = true; }
+void TeleopController::requestEstop(const char* reason) {
+  estopReason_ = reason;
+  estopRequested_ = true;
+}
 
 void TeleopController::snapshot(Snapshot& out) {
   portENTER_CRITICAL(&mux_);
@@ -261,7 +264,9 @@ void TeleopController::cycle() {
 
   if (estopRequested_) {
     estopRequested_ = false;
-    torqueOffAll("E-stop");
+    const char* reason = estopReason_;
+    estopReason_ = nullptr;
+    torqueOffAll(reason != nullptr ? reason : "E-stop");
   }
   QueuedCommand queued;
   while (xQueueReceive(commands_, &queued, 0) == pdTRUE) {

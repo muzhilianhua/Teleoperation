@@ -137,7 +137,8 @@ class TeleopController {
   // seq != 0 (host link): events carry it and a Completion follows them.
   bool post(const Command& command, TickType_t wait, uint16_t seq = 0);
   // Same path as the BOOT button: torque off on the next control cycle.
-  void requestEstop();
+  // `reason` must be a string literal (it is printed later).
+  void requestEstop(const char* reason);
   void snapshot(Snapshot& out);
   // Returns false when the queue is empty. Drain events before taking a
   // completion and again before reporting it: its events were queued first.
@@ -283,6 +284,7 @@ class TeleopController {
   Snapshot staging_;
   Snapshot shared_;
   volatile bool estopRequested_ = false;
+  const char* volatile estopReason_ = nullptr;  // nullptr: BOOT button
 
   JointChannel channels_[teleop::kMaxJoints];
   teleop::GlobalSettings global_;
