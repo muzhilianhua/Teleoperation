@@ -6,11 +6,12 @@
 
 #include <Arduino.h>
 
+#include "console_out.h"
 #include "control_task.h"
 
 class Console {
  public:
-  explicit Console(TeleopController& controller) : controller_(controller) {}
+  explicit Console(TeleopController& controller) : controller_(controller), out_(Serial) {}
   void startTask();
 
  private:
@@ -28,6 +29,7 @@ class Console {
   void plot();
 
   TeleopController& controller_;
+  ConsoleOut out_;
   Snapshot snapshot_;
   char line_[128];
   size_t lineLength_ = 0;
