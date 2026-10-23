@@ -1,0 +1,19 @@
+// Navigation: core pages (one per group of console commands) and plugin
+// pages. A plugin page whose id matches a server plugin (GET /api/plugins)
+// is listed under "Plugins"; unknown server plugins get the placeholder.
+
+import type { Component } from 'svelte';
+
+export interface PageDef {
+  id: string;
+  title: string;
+  group: 'Operate' | 'Setup' | 'Diagnose' | 'Plugins';
+  load: () => Promise<{ default: Component<any> }>;
+}
+
+export const corePages: PageDef[] = [];
+
+// Pages for server plugins, keyed by plugin id. Missing ones use PluginPlaceholder.
+export const pluginPages: Record<string, PageDef['load']> = {};
+
+export const placeholderPage: PageDef['load'] = () => import('../pages/PluginPlaceholder.svelte');
