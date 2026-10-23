@@ -11,7 +11,10 @@ export interface PageDef {
   load: () => Promise<{ default: Component<any> }>;
 }
 
-export const corePages: PageDef[] = [];
+export const corePages: PageDef[] = [
+  { id: 'dashboard', title: 'Dashboard', group: 'Operate', load: () => import('../pages/Dashboard.svelte') },
+  { id: 'console', title: 'Console', group: 'Diagnose', load: () => import('../pages/Console.svelte') },
+];
 
 // Pages for server plugins, keyed by plugin id. Missing ones use PluginPlaceholder.
 export const pluginPages: Record<string, PageDef['load']> = {};

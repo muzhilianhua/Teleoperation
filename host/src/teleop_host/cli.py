@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--version", action="version", version=f"teleop-host {__version__}")
     parser.add_argument("--port", help="serial port of the ESP32 (default: the only one found, else pick in the GUI)")
     parser.add_argument("--sim", action="store_true", help="offer a simulated device (and connect to it)")
-    parser.add_argument("--bind", default="127.0.0.1:8765", help="host:port to serve on (default 127.0.0.1:8765)")
+    parser.add_argument("--bind", default="127.0.0.1:8790", help="host:port to serve on (default 127.0.0.1:8790)")
     parser.add_argument("--backups", type=Path, default=DEFAULT_DIR, help=f"backup directory (default {DEFAULT_DIR})")
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser")
     parser.add_argument("--dev", action="store_true", help=f"open the Vite dev server ({DEV_SERVER}) instead")
