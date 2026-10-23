@@ -62,7 +62,7 @@ class FakeDevice:
 
     def write(self, data: bytes) -> None:
         if self._closed.is_set():
-            raise OSError("fake device closed")
+            raise OSError("fake device shut down")
         self._in.put(bytes(data))
         if not self.realtime:
             self.poll()
@@ -80,7 +80,14 @@ class FakeDevice:
                 return b"".join(parts)
 
     def close(self) -> None:
+        """Closing the port leaves the device running, like unplugging nothing."""
+        while not self._out.empty():
+            self._out.get_nowait()
+
+    def shutdown(self) -> None:
         self._closed.set()
+        if self._thread is not None:
+            self._thread.join(1.0)
 
     # ---- device side -----------------------------------------------------------------
 
@@ -138,6 +145,8 @@ class FakeDevice:
 
     def _feed_text(self, data: bytes) -> None:
         self._text += data
+        if 0 in self._text:  # like the console: a 0x00 drops the line so far
+            self._text = self._text[self._text.rindex(0) + 1 :]
         while b"\n" in self._text:
             raw, _, rest = bytes(self._text).partition(b"\n")
             self._text = bytearray(rest)
@@ -185,6 +194,10 @@ class FakeDevice:
             if isinstance(item, Frame) and self._host:
                 self._last_rx = time.monotonic()
                 self._handle_frame(item)
+        if not self._host:  # left host mode: the console reads the rest as text
+            leftover = bytes(self._decoder._buffer)
+            self._decoder = FrameDecoder()
+            self._feed_text(leftover)
 
     def _ack(self, seq: int, status: AckStatus = AckStatus.ACCEPTED, text: str = "") -> None:
         self._send(MsgType.ACK, Ack(seq, status, text).encode())
