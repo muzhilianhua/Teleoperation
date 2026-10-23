@@ -320,6 +320,14 @@ void test_grip_fast_but_loaded_is_not_contact() {
   TEST_ASSERT_EQUAL_FLOAT(60.0f, g.lead());
 }
 
+void test_grip_effort_uses_current_share_when_known() {
+  // SCS0009 (no current) or HLS before arming (cap unknown): |load|.
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 35.0f, gripEffortPct(-35.0f, false, 0.0f, 0.0f));
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 35.0f, gripEffortPct(-35.0f, true, 900.0f, 0.0f));
+  // HLS at a 3000 mA cap: duty may read only 13 % while current is at 90 %.
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 90.0f, gripEffortPct(13.0f, true, -2700.0f, 3000.0f));
+}
+
 void test_grip_contact_shrinks_lead_and_clamps_goal() {
   GripLimiter g = makeGrip();
   for (int i = 0; i < 5; ++i) TEST_ASSERT_TRUE(g.update(-75.0f, 0.0f));  // sign does not matter
@@ -417,6 +425,7 @@ int main() {
   RUN_TEST(test_supervisor_over_current);
   RUN_TEST(test_grip_free_motion_keeps_full_lead);
   RUN_TEST(test_grip_fast_but_loaded_is_not_contact);
+  RUN_TEST(test_grip_effort_uses_current_share_when_known);
   RUN_TEST(test_grip_contact_shrinks_lead_and_clamps_goal);
   RUN_TEST(test_grip_holds_in_hysteresis_band_and_recovers);
   RUN_TEST(test_grip_disabled_passes_goal_through);

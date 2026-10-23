@@ -54,17 +54,27 @@ struct JointSettings {
   // HLS3606 only: goal current cap in mA sent with every goal (the servo
   // limits its torque to it). 0 = the servo's own protection current.
   uint16_t currentLimitMa = 0;
+  // HLS3606 only: OverCurrent trips when |current| stays at or above this %
+  // of the goal-current cap for 0.2 s; 0 = off (the servo's own over-current
+  // cut-out still acts). A bench setting: not stored in NVS or in `dump`, so
+  // it is back to the default after boot, `load` or `defaults`.
+  uint8_t currentTripPct = 90;
 };
 
 constexpr uint16_t kMinCurrentLimitMa = 7;      // 1 unit of 6.5 mA
 constexpr uint16_t kMaxCurrentLimitMa = 13306;  // 2047 units
+constexpr uint8_t kDefaultCurrentTripPct = 90;  // DEX_hand_software current_trip_frac
+constexpr uint8_t kMinCurrentTripPct = 50;
+constexpr uint8_t kMaxCurrentTripPct = 100;
 
 struct GlobalSettings {
   float leadMs = 0.0f;
   float minCutoffHz = 1.0f;
   float beta = 0.01f;
   float jumpDeg = 25.0f;      // largest plausible exo change per control cycle
-  float gripLoadPct = 60.0f;  // sustained squeeze target, below the servo's 80 % / 1 s overload cut-out
+  // Sustained squeeze target: % load on an SCS0009 (below its 80 % / 1 s
+  // overload cut-out), % of the goal-current cap on an HLS3606 (below itrip).
+  float gripLoadPct = 60.0f;
   // Firmware load trips (75 % / 0.3 s, 80 % / 0.1 s). Off by default so a
   // grasp can load the servo; the servo's own overload protection then decides.
   bool loadTripEnabled = false;

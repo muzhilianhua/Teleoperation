@@ -96,7 +96,8 @@ constexpr KeyName kJointNumberKeys[] = {{"vmax", SetKey::VMax},
                                         {"vsat", SetKey::VSat},
                                         {"trk", SetKey::Track},
                                         {"grip", SetKey::Grip},
-                                        {"ilimit", SetKey::CurrentLimit}};
+                                        {"ilimit", SetKey::CurrentLimit},
+                                        {"itrip", SetKey::CurrentTrip}};
 
 const char* parseSet(const Tokens& tk, ParsedCommand& out) {
   out.verb = Verb::Set;
@@ -169,14 +170,14 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     if (!eq(key, k.name)) continue;
     long v = 0;
     if (tk.n != 4 || !parseInt(tk.t[3], 0, 65535, v)) {
-      return "usage: set <joint> <vmax|amax|vsat|trk|grip|ilimit> <integer>";
+      return "usage: set <joint> <vmax|amax|vsat|trk|grip|ilimit|itrip> <integer>";
     }
     out.key = k.key;
     out.values[0] = static_cast<float>(v);
     out.valueCount = 1;
     return nullptr;
   }
-  return "unknown key (on off enc exo exospan servo vmax amax vsat trk grip ilimit | lead mincut beta jump gripload loadtrip)";
+  return "unknown key (on off enc exo exospan servo vmax amax vsat trk grip ilimit itrip | lead mincut beta jump gripload loadtrip)";
 }
 
 struct Simple {
@@ -414,6 +415,7 @@ const char* applySetting(const ParsedCommand& c, JointSettings* joints, const Jo
     case SetKey::Track: s.trackSteps = static_cast<uint16_t>(v0); break;
     case SetKey::Grip: s.gripSteps = static_cast<uint16_t>(v0); break;
     case SetKey::CurrentLimit: s.currentLimitMa = static_cast<uint16_t>(v0); break;
+    case SetKey::CurrentTrip: s.currentTripPct = static_cast<uint8_t>(v0 > 255 ? 255 : v0); break;
     default: return "unknown key";
   }
   const char* error = validateJoint(s, defaults[index], encoderCount);

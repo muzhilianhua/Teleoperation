@@ -10,12 +10,22 @@
 //   relaxed (|load| <  loadPct - hysteresisPct):          L += growStep
 // In free motion the load stays low and L stays at maxLead, which is larger
 // than what a following servo lags, so tracking is not slowed.
+//
+// On a current-limited servo (HLS3606) the squeeze is bounded by the goal
+// current, and the drive duty (load) falls once that limit acts, so the
+// limiter is fed |current| as % of the cap instead (gripEffortPct).
 
 #pragma once
 
 #include <math.h>
 
 namespace teleop {
+
+// The quantity the limiter regulates, in %: |current| / cap when the servo
+// reports current and the cap is known, otherwise |load|.
+inline float gripEffortPct(float loadPct, bool hasCurrent, float currentMa, float capMa) {
+  return hasCurrent && capMa > 0.0f ? 100.0f * fabsf(currentMa) / capMa : fabsf(loadPct);
+}
 
 class GripLimiter {
  public:

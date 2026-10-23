@@ -316,6 +316,38 @@ void test_current_limit_rules() {
   TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
 }
 
+void test_current_trip_rules() {
+  JointSettings joints[kMaxJoints];
+  loadDefaults(joints);
+  GlobalSettings g;
+  ParsedCommand c;
+  TEST_ASSERT_EQUAL(kDefaultCurrentTripPct, joints[1].currentTripPct);
+  TEST_ASSERT_NULL(parseCommand("set 2 itrip 0", c));
+  TEST_ASSERT_EQUAL(SetKey::CurrentTrip, c.key);
+  TEST_ASSERT_FALSE(requiresDisarmed(c));  // bench measurements run armed
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL(0, joints[1].currentTripPct);
+  parseCommand("set 2 itrip 100", c);
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 2 itrip 40", c);
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 2 itrip 306", c);  // would wrap to 50 as a byte
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 1 itrip 80", c);  // SCS0009: no current reading
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+
+  // A bench setting: neither stored nor dumped.
+  uint8_t blob[kBlobSize];
+  packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob));
+  JointSettings out[kMaxJoints];
+  GlobalSettings og;
+  unpackConfig(blob, sizeof(blob), kDefaults, kMaxJoints, kEncoders, GlobalSettings(), out, og);
+  TEST_ASSERT_EQUAL(kDefaultCurrentTripPct, out[1].currentTripPct);
+  char text[3072];
+  TEST_ASSERT_GREATER_THAN(0, formatDump(joints, kDefaults, kMaxJoints, g, text, sizeof(text)));
+  TEST_ASSERT_NULL(strstr(text, "itrip"));
+}
+
 void test_undefined_travel_blocks_joint() {
   const JointDefaults& d = kDefaults[8];
   TEST_ASSERT_FALSE(travelDefined(d));
@@ -558,6 +590,7 @@ int main() {
   RUN_TEST(test_blob_changed_model_resets_that_joint);
   RUN_TEST(test_defaults_scale_with_servo_model);
   RUN_TEST(test_current_limit_rules);
+  RUN_TEST(test_current_trip_rules);
   RUN_TEST(test_undefined_travel_blocks_joint);
   RUN_TEST(test_parse_basic_commands);
   RUN_TEST(test_parse_set_commands);

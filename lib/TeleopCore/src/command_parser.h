@@ -57,6 +57,7 @@ enum class SetKey : uint8_t {
   Track,
   Grip,
   CurrentLimit,  // HLS goal current cap in mA, 0 = servo protection current
+  CurrentTrip,   // HLS over-current trip, % of the cap, 0 = off (not persisted)
   Lead,       // global
   MinCutoff,  // global
   Beta,       // global

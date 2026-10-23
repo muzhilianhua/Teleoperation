@@ -152,8 +152,9 @@ void TeleopController::applyRuntimeParams(JointChannel& ch) {
   teleop::SupervisorConfig sc;
   sc.trackingErrorSteps = ch.settings.trackSteps;
   sc.loadTripEnabled = global_.loadTripEnabled;
-  // DEX_hand_software: trip at 0.9 x the effective current cap for 0.2 s.
-  sc.currentTripMa = 0.9f * effectiveCurrentMa(ch);
+  // DEX_hand_software: trip at 0.9 x the effective current cap for 0.2 s
+  // (`itrip` changes the fraction; 0 = off).
+  sc.currentTripMa = 0.01f * ch.settings.currentTripPct * effectiveCurrentMa(ch);
   ch.supervisor.setConfig(sc);
   applyGoalCurrent(ch);
   teleop::GripLimiter::Config gc;
@@ -342,7 +343,9 @@ void TeleopController::readServos(uint32_t nowMs) {
     if (ch.servoOk) {
       ch.servo = st;
       ch.lastGoodReadMs = nowMs;
-      ch.contact = ch.armed() && ch.grip.update(st.loadPct, st.speed);
+      const float effort =
+          teleop::gripEffortPct(st.loadPct, st.hasCurrent, st.currentMa, effectiveCurrentMa(ch));
+      ch.contact = ch.armed() && ch.grip.update(effort, st.speed);
     }
     teleop::ServoSample sample;
     // Contact and sweeps both make lagging behind the goal expected, so the
@@ -639,6 +642,15 @@ void TeleopController::handleSet(const Command& c) {
             s.enabled ? "on" : "off", s.encoderIndex == teleop::kNoEncoder ? -1 : s.encoderIndex,
             static_cast<long>(s.exoB), s.servoA, s.servoB, s.vmax, s.amax, s.vsat, s.trackSteps,
             s.gripSteps);
+    if (ch->def->model == feetech::ServoModel::Hls3606) {
+      message("joint %u: ilimit %u mA (cap now %.0f mA), itrip %u %%%s", c.joint, s.currentLimitMa,
+              effectiveCurrentMa(*ch), s.currentTripPct, s.currentTripPct == 0 ? " (off)" : "");
+      // The grip limiter holds the squeeze near gripload % of the cap.
+      if (s.currentTripPct != 0 && s.currentTripPct < global_.gripLoadPct + 10.0f) {
+        message("warning: itrip %u %% is within 10 %% of gripload %.0f %%: a held grasp may trip",
+                s.currentTripPct, global_.gripLoadPct);
+      }
+    }
   }
 }
 

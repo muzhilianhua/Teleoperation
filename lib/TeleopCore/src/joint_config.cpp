@@ -25,6 +25,7 @@ JointSettings defaultSettings(const JointDefaults& d) {
   s.trackSteps = static_cast<uint16_t>(lroundf(scaledSteps(d, 40.0f)));
   s.gripSteps = static_cast<uint16_t>(lroundf(scaledSteps(d, 60.0f)));
   s.currentLimitMa = 0;
+  s.currentTripPct = kDefaultCurrentTripPct;
   return s;
 }
 
@@ -57,6 +58,12 @@ const char* validateJoint(const JointSettings& s, const JointDefaults& d, uint8_
   if (s.currentLimitMa != 0) {
     if (d.model != feetech::ServoModel::Hls3606) return "ilimit applies to HLS3606 joints only";
     if (!inRange(s.currentLimitMa, kMinCurrentLimitMa, kMaxCurrentLimitMa)) return "ilimit outside 7..13306 mA";
+  }
+  if (s.currentTripPct != kDefaultCurrentTripPct) {
+    if (d.model != feetech::ServoModel::Hls3606) return "itrip applies to HLS3606 joints only";
+    if (s.currentTripPct != 0 && !inRange(s.currentTripPct, kMinCurrentTripPct, kMaxCurrentTripPct)) {
+      return "itrip must be 0 (off) or 50..100 %";
+    }
   }
   return nullptr;
 }
