@@ -156,6 +156,8 @@ void Console::enterHostMode() {
   hostMode_ = true;
   lastRxMs_ = millis();
   out_.setLineSink(logSink, this);
+  // Ends any text the host has not consumed yet, so it cannot run into HELLO.
+  Serial.write(static_cast<uint8_t>(0));
   sendHello();
 }
 
