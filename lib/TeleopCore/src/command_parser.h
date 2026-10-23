@@ -42,6 +42,7 @@ enum class Verb : uint8_t {
   Sweep,        // joint
   SweepApply,   // joint
   Home,         // joint: glove held at pose A, fixes a multi-turn joint's turn count
+  Host,         // flag = on: switch the console to the framed host link (PC GUI)
 };
 
 enum class SetKey : uint8_t {

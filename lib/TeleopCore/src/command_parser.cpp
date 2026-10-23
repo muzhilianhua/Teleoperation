@@ -299,6 +299,11 @@ const char* parseCommand(const char* line, ParsedCommand& out) {
     out.verb = Verb::Monitor;
     return nullptr;
   }
+  if (eq(cmd, "host")) {
+    if (tk.n != 2 || !parseOnOff(tk.t[1], out.flag)) return "usage: host on|off";
+    out.verb = Verb::Host;
+    return nullptr;
+  }
   if (eq(cmd, "plot")) {
     out.verb = Verb::Plot;
     if (tk.n == 2 && eq(tk.t[1], "off")) return nullptr;

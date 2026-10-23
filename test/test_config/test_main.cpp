@@ -394,6 +394,11 @@ void test_parse_basic_commands() {
   TEST_ASSERT_NULL(parseCommand("monitor on", c));
   TEST_ASSERT_EQUAL(Verb::Monitor, c.verb);
   TEST_ASSERT_TRUE(c.flag);
+  TEST_ASSERT_NULL(parseCommand("host on", c));
+  TEST_ASSERT_EQUAL(Verb::Host, c.verb);
+  TEST_ASSERT_TRUE(c.flag);
+  TEST_ASSERT_FALSE(requiresDisarmed(c));  // the GUI may attach to an armed hand
+  TEST_ASSERT_NOT_NULL(parseCommand("host", c));
   TEST_ASSERT_NULL(parseCommand("plot 2 on", c));
   TEST_ASSERT_EQUAL(Verb::Plot, c.verb);
   TEST_ASSERT_EQUAL(2, c.joint);

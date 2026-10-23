@@ -93,6 +93,7 @@ void Console::handleLine(const char* line) {
     case Verb::Enc: printEncoders(); return;
     case Verb::Joints: printJoints(); return;
     case Verb::Dump: printDump(); return;
+    case Verb::Host: Serial.println("error: host link not available in this build"); return;
     case Verb::Plot:
       if (cmd.flag && jointIndex(cmd.joint) < 0) {
         Serial.printf("error: no joint with servo id %u\n", cmd.joint);
