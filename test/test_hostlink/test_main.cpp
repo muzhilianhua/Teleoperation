@@ -1,9 +1,13 @@
 #include <byte_buffer.h>
 #include <frame.h>
+#include <host_messages.h>
 #include <string.h>
 #include <unity.h>
 
+#include <string>
 #include <vector>
+
+#include "golden_vectors.h"
 
 using namespace hostlink;
 
@@ -28,6 +32,18 @@ void assertCobs(const std::vector<uint8_t>& raw, const std::vector<uint8_t>& wir
   TEST_ASSERT_TRUE(cobsDecode(wire.data(), wire.size(), back.data(), back.size(), n));
   TEST_ASSERT_EQUAL(raw.size(), n);
   if (n > 0) TEST_ASSERT_EQUAL_HEX8_ARRAY(raw.data(), back.data(), n);
+}
+
+std::vector<uint8_t> fromHex(const char* hex) {
+  std::vector<uint8_t> out;
+  for (const char* p = hex; p[0] && p[1]; p += 2) out.push_back(static_cast<uint8_t>(std::stoi(std::string(p, 2), nullptr, 16)));
+  return out;
+}
+
+void assertBytes(const char* hex, const uint8_t* bytes, size_t length) {
+  const std::vector<uint8_t> expected = fromHex(hex);
+  TEST_ASSERT_EQUAL(expected.size(), length);
+  TEST_ASSERT_EQUAL_HEX8_ARRAY(expected.data(), bytes, length);
 }
 
 std::vector<uint8_t> range(uint8_t first, size_t count) {
@@ -221,6 +237,243 @@ void test_byte_writer_stops_at_capacity() {
   TEST_ASSERT_EQUAL(2, w.length());
 }
 
+
+// ---- Message layouts (golden vectors shared with the host) --------------------
+
+namespace {
+
+hostlink::Telemetry sampleTelemetry() {
+  Telemetry t;
+  t.cycle = 123456;
+  t.tUs = 0x89ABCDEF;
+  t.uptimeMs = 1234567;
+  t.armedCount = 2;
+  t.handFlags = kHandTorqueOffConfirmed;
+  t.execUs = 850;
+  t.jointCount = 2;
+  TelemetryJoint& a = t.joints[0];
+  a.state = 2;
+  a.flags = 0x2F23;
+  a.encRaw = 8191;
+  a.exoCounts = -1234.5f;
+  a.exoFilteredCounts = -1230.25f;
+  a.target = 512.5f;
+  a.goal = 510.0f;
+  a.sentGoal = 508.75f;
+  a.reference = 505.5f;
+  a.speedCommand = 1300;
+  a.gripLead = 60;
+  a.position = 507;
+  a.speed = -120;
+  a.loadDeciPct = -355;
+  a.voltageDeciV = 60;
+  a.temperatureC = 35;
+  a.readAgeMs = 12;
+  TelemetryJoint& b = t.joints[1];
+  b.fault = 10;
+  b.flags = 0x1200;
+  b.position = 2048;
+  b.currentMa = -2700;
+  b.voltageDeciV = 74;
+  b.temperatureC = -5;
+  b.status = 8;
+  b.readAgeMs = 65535;
+  return t;
+}
+
+hostlink::SlowStatus sampleSlowStatus() {
+  SlowStatus s;
+  s.minCutoffHz = 1.0f;
+  s.beta = 0.0078125f;
+  s.jumpDeg = 25.0f;
+  s.gripLoadPct = 60.0f;
+  s.cycles = 1000;
+  s.overruns = 1;
+  s.lastPeriodUs = 10000;
+  s.maxJitterUs = 12;
+  s.p99JitterUs = 8;
+  s.lastExecUs = 900;
+  s.maxExecUs = 1800;
+  s.averageExecUs = 850;
+  s.busSent = 500;
+  s.busReceived = 498;
+  s.busTimeouts = 2;
+  s.busLastReplyUs = 180;
+  s.busMaxReplyUs = 950;
+  s.busEcho = 1;
+  s.encoderAverageUs = 1500;
+  s.encoderMaxUs = 1700;
+  s.encoderMaxSkewUs = 40;
+  s.droppedEvents = 3;
+  s.rxCrcErrors = 1;
+  s.rxMalformed = 2;
+  s.monitor = 1;
+  s.monitorOkMask = 0x0001;
+  s.jointCount = 1;
+  s.monitorPosition[0] = 512;
+  SlowJoint& j = s.joints[0];
+  j.enabled = 1;
+  j.encoderIndex = 2;
+  j.exoRef = 1000;
+  j.exoB = -8192;
+  j.servoA = 794;
+  j.servoB = 1900;
+  j.vmax = 1333;
+  j.amax = 26666;
+  j.vsat = 167;
+  j.trackSteps = 133;
+  j.gripSteps = 200;
+  j.currentLimitMa = 500;
+  j.currentTripPct = 90;
+  j.detectedModel = 2;
+  j.effectiveCurrentMa = 494;
+  j.jumpRejects = 7;
+  s.encoderCount = 1;
+  SlowEncoder& e = s.encoders[0];
+  e.address = 0x40;
+  e.valid = 1;
+  e.angle = 4095;
+  e.agc = 88;
+  e.magnetOk = 1;
+  e.errors = 3;
+  return s;
+}
+
+}  // namespace
+
+void test_hello_golden_vector() {
+  static const char* const faults[] = {"none", "comm lost"};
+  static const char* const states[] = {"OFF", "ALIGN"};
+  static const char* const events[] = {"generic"};
+  static const char* const models[] = {"unknown", "SCS0009", "HLS3606"};
+  JointInfo joint;
+  joint.servoId = 2;
+  joint.model = 2;
+  joint.travelMin = 794;
+  joint.travelMax = 1911;
+  joint.vmax = 1333;
+  joint.vsat = 167;
+  joint.amax = 26666;
+  joint.maxSpeed = 12492;
+  joint.encoderDefault = 2;
+  joint.stepScale = 3.25f;
+  joint.degreesPerStep = 0.087890625f;
+  joint.name = "thumb_near";
+  DeviceInfo info;
+  info.firmware = "abc1234";
+  info.degreesPerCount = 360.0f / 16384.0f;
+  info.encoderCount = 9;
+  info.minCurrentLimitMa = 7;
+  info.maxCurrentLimitMa = 13306;
+  info.minCurrentTripPct = 50;
+  info.maxCurrentTripPct = 100;
+  info.defaultCurrentTripPct = 90;
+  info.minExoSpanCounts = 182;
+  info.maxExoSpanCounts = 49152;
+  info.joints = &joint;
+  info.jointCount = 1;
+  info.faults = {faults, 2};
+  info.states = {states, 2};
+  info.events = {events, 1};
+  info.models = {models, 3};
+  uint8_t out[512];
+  const size_t n = encodeHello(info, out, sizeof(out));
+  assertBytes(kGoldenHelloHex, out, n);
+  TEST_ASSERT_EQUAL(0, encodeHello(info, out, 20));  // too small
+}
+
+void test_telemetry_golden_vector_and_round_trip() {
+  const Telemetry t = sampleTelemetry();
+  uint8_t out[telemetrySize(kMaxJoints)];
+  const size_t n = encodeTelemetry(t, out, sizeof(out));
+  TEST_ASSERT_EQUAL(telemetrySize(2), n);
+  assertBytes(kGoldenTelemetryHex, out, n);
+  Telemetry back;
+  TEST_ASSERT_TRUE(decodeTelemetry(out, n, back));
+  TEST_ASSERT_EQUAL(0x89ABCDEF, back.tUs);
+  TEST_ASSERT_EQUAL_FLOAT(-1230.25f, back.joints[0].exoFilteredCounts);
+  TEST_ASSERT_EQUAL(-2700, back.joints[1].currentMa);
+  TEST_ASSERT_EQUAL(-5, back.joints[1].temperatureC);
+  TEST_ASSERT_FALSE(decodeTelemetry(out, n - 1, back));  // truncated
+}
+
+void test_full_hand_telemetry_size() {
+  Telemetry t;
+  t.jointCount = kMaxJoints;
+  uint8_t out[512];
+  TEST_ASSERT_EQUAL(450, encodeTelemetry(t, out, sizeof(out)));
+  TEST_ASSERT_LESS_OR_EQUAL(470, maxWireSize(450));
+}
+
+void test_slow_status_golden_vector_and_round_trip() {
+  const SlowStatus s = sampleSlowStatus();
+  uint8_t out[1024];
+  const size_t n = encodeSlowStatus(s, out, sizeof(out));
+  assertBytes(kGoldenSlowStatusHex, out, n);
+  SlowStatus back;
+  TEST_ASSERT_TRUE(decodeSlowStatus(out, n, back));
+  TEST_ASSERT_EQUAL(-8192, back.joints[0].exoB);
+  TEST_ASSERT_EQUAL(494, back.joints[0].effectiveCurrentMa);
+  TEST_ASSERT_EQUAL_HEX8(0x40, back.encoders[0].address);
+  TEST_ASSERT_EQUAL(3, back.encoders[0].errors);
+}
+
+void test_full_hand_slow_status_size() {
+  SlowStatus s;
+  s.jointCount = kMaxJoints;
+  s.encoderCount = kMaxEncoders;
+  uint8_t out[1024];
+  // 114 B fixed (21 global, 32 timing, 29 bus, 12 encoder pass, 16 link, 4 monitor)
+  // + 9 x (2 + 32) monitor positions and joints + 1 + 9 x 11 encoders = 520 B
+  TEST_ASSERT_EQUAL(114 + 9 * 34 + 1 + 9 * 11, encodeSlowStatus(s, out, sizeof(out)));
+}
+
+void test_event_golden_vector_and_round_trip() {
+  Event e;
+  e.code = EventCode::SweepDone;
+  e.joint = 4;
+  e.cmdSeq = 77;
+  e.args[0] = 1333;
+  e.args[1] = 167;
+  e.args[2] = 1;
+  strcpy(e.text, "sweep j4: done");
+  uint8_t out[256];
+  const size_t n = encodeEvent(e, out, sizeof(out));
+  assertBytes(kGoldenEventHex, out, n);
+  Event back;
+  TEST_ASSERT_TRUE(decodeEvent(out, n, back));
+  TEST_ASSERT_EQUAL(EventCode::SweepDone, back.code);
+  TEST_ASSERT_EQUAL(77, back.cmdSeq);
+  TEST_ASSERT_EQUAL(167, back.args[1]);
+  TEST_ASSERT_EQUAL_STRING("sweep j4: done", back.text);
+}
+
+void test_replies_and_host_messages() {
+  uint8_t out[64];
+  const uint8_t ack[] = {0x07, 0x00, 0x01, 'b', 'a', 'd'};
+  size_t n = encodeAck(7, AckStatus::ParseError, "bad", out, sizeof(out));
+  TEST_ASSERT_EQUAL(sizeof(ack), n);
+  TEST_ASSERT_EQUAL_HEX8_ARRAY(ack, out, n);
+  n = encodeDone(0x0102, false, out, sizeof(out));
+  const uint8_t done[] = {0x02, 0x01, 0x01};
+  TEST_ASSERT_EQUAL_HEX8_ARRAY(done, out, n);
+  n = encodeLog(LogSource::EspLog, "W x", 3, out, sizeof(out));
+  const uint8_t log[] = {0x01, 'W', ' ', 'x'};
+  TEST_ASSERT_EQUAL_HEX8_ARRAY(log, out, n);
+
+  const uint8_t hello[] = {0x01, 0x01, 0xE8, 0x03, 0x02, 0x0A};
+  HostHello h;
+  TEST_ASSERT_TRUE(decodeHostHello(hello, sizeof(hello), h));
+  TEST_ASSERT_EQUAL(1000, h.heartbeatTimeoutMs);
+  TEST_ASSERT_EQUAL(2, h.telemetryDivider);
+  TEST_ASSERT_FALSE(decodeHostHello(hello, 4, h));
+  TelemConfig c;
+  const uint8_t config[] = {0x05, 0x00};
+  TEST_ASSERT_TRUE(decodeTelemConfig(config, sizeof(config), c));
+  TEST_ASSERT_EQUAL(5, c.telemetryDivider);
+  TEST_ASSERT_EQUAL(0, c.slowDivider);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_crc16_check_value);
@@ -235,5 +488,12 @@ int main(int, char**) {
   RUN_TEST(test_encode_frame_limits);
   RUN_TEST(test_byte_writer_reader_round_trip);
   RUN_TEST(test_byte_writer_stops_at_capacity);
+  RUN_TEST(test_hello_golden_vector);
+  RUN_TEST(test_telemetry_golden_vector_and_round_trip);
+  RUN_TEST(test_full_hand_telemetry_size);
+  RUN_TEST(test_slow_status_golden_vector_and_round_trip);
+  RUN_TEST(test_full_hand_slow_status_size);
+  RUN_TEST(test_event_golden_vector_and_round_trip);
+  RUN_TEST(test_replies_and_host_messages);
   return UNITY_END();
 }
