@@ -3,6 +3,7 @@
 #include <command_parser.h>
 
 #include "host_telemetry.h"
+#include "hand.h"
 
 using teleop::Verb;
 using hostlink::MsgType;
@@ -33,7 +34,7 @@ const char* encoderStateShort(AS5048BChannelState state) {
 float supplyEstimateMa(const ServoState& s) { return fabsf(s.currentMa) * fabsf(s.loadPct) / 100.0f; }
 
 int jointIndex(uint8_t servoId) {
-  return teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
+  return teleop::jointIndexForServo(hand::joints(), teleop::kMaxJoints, servoId);
 }
 
 }  // namespace
@@ -415,7 +416,7 @@ void Console::printStatus() {
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     const JointSnapshot& j = s.joints[i];
     if (!j.settings.enabled && j.state == JointState::Off) continue;
-    const teleop::JointDefaults& d = config::kJoints[i];
+    const teleop::JointDefaults& d = hand::joints()[i];
     out_.printf("j%u %-13s %-6s exo %7.2f deg  target %6.1f  goal %6.1f  sent %6.1f  grip %3.0f%s  spd %5.0f",
                   d.servoId, d.name, jointStateToString(j.state),
                   j.exoFilteredCounts * teleop::kDegreesPerCount, j.target, j.goal, j.sentGoal,
@@ -444,7 +445,7 @@ void Console::printJoints() {
       "id name           model on enc  exo span   servo A..B   travel     vmax  amax  vsat trk  ilimit/trip "
       "ready home  state  last fault");
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
-    const teleop::JointDefaults& d = config::kJoints[i];
+    const teleop::JointDefaults& d = hand::joints()[i];
     const JointSnapshot& j = snapshot_.joints[i];
     const teleop::JointSettings& s = j.settings;
     char enc[6];
@@ -523,7 +524,7 @@ void Console::printStats() {
     const JointSnapshot& j = snapshot_.joints[i];
     if (j.settings.enabled && j.jumpRejects > 0) {
       out_.printf("joint %u: %lu encoder samples rejected by the jump guard\n",
-                    config::kJoints[i].servoId, (unsigned long)j.jumpRejects);
+                    hand::joints()[i].servoId, (unsigned long)j.jumpRejects);
     }
   }
 }
@@ -535,7 +536,7 @@ void Console::printEncoders() {
     const EncoderSummary& enc = snapshot_.encoders[e];
     int joint = 0;
     for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
-      if (snapshot_.joints[i].settings.encoderIndex == e) joint = config::kJoints[i].servoId;
+      if (snapshot_.joints[i].settings.encoderIndex == e) joint = hand::joints()[i].servoId;
     }
     out_.printf("%u  0x%02X  %-5s  %d      %7.2f    %3u  %d       %-6lu  %s%d\n", e, enc.address,
                   encoderStateShort(enc.state), enc.valid, enc.angle * teleop::kDegreesPerCount,
@@ -556,7 +557,7 @@ bool Console::formatDumpText() {
   // Uses snapshot_ as the caller left it.
   teleop::JointSettings joints[teleop::kMaxJoints];
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) joints[i] = snapshot_.joints[i].settings;
-  return teleop::formatDump(joints, config::kJoints, teleop::kMaxJoints, snapshot_.global, dumpBuffer,
+  return teleop::formatDump(joints, hand::joints(), teleop::kMaxJoints, snapshot_.global, dumpBuffer,
                             sizeof(dumpBuffer)) > 0;
 }
 
@@ -575,9 +576,9 @@ void Console::printMonitorRow() {
   out_.print(" | servo");
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     if (snapshot_.monitorOk[i]) {
-      out_.printf(" %u:%4d", config::kJoints[i].servoId, snapshot_.monitorPosition[i]);
+      out_.printf(" %u:%4d", hand::joints()[i].servoId, snapshot_.monitorPosition[i]);
     } else {
-      out_.printf(" %u: -- ", config::kJoints[i].servoId);
+      out_.printf(" %u: -- ", hand::joints()[i].servoId);
     }
   }
   out_.println();

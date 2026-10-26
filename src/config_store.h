@@ -1,4 +1,5 @@
-// NVS persistence of the packed settings blob (Preferences namespace "teleop").
+// NVS persistence of the packed settings blob (Preferences namespace "teleop",
+// one key per hand: hand::storeKey()).
 // Writing flash stalls the caches of both cores, so callers save only while
 // the hand is disarmed.
 

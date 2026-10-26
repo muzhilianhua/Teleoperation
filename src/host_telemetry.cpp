@@ -2,6 +2,8 @@
 
 #include <math.h>
 
+#include "hand.h"
+
 #ifndef FW_GIT_REV
 #define FW_GIT_REV __DATE__ " " __TIME__
 #endif
@@ -60,7 +62,7 @@ const hostlink::DeviceInfo& deviceInfo() {
   static bool built = false;
   if (built) return info;
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
-    const teleop::JointDefaults& d = config::kJoints[i];
+    const teleop::JointDefaults& d = hand::joints()[i];
     const feetech::ModelInfo& m = feetech::modelInfo(d.model);
     hostlink::JointInfo& j = joints[i];
     j.servoId = d.servoId;

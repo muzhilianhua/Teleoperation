@@ -5,6 +5,7 @@
 #include <stdarg.h>
 
 #include "config_store.h"
+#include "hand.h"
 #include "host_telemetry.h"
 
 using teleop::Fault;
@@ -57,7 +58,7 @@ TeleopController::TeleopController(ServoBus& bus, FeetechPort& port, AS5048BGrou
   global_ = config::kGlobalDefaults;
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     JointChannel& ch = channels_[i];
-    ch.def = &config::kJoints[i];
+    ch.def = &hand::joints()[i];
     ch.scale = teleop::stepScale(*ch.def);
     bus_.setModel(ch.def->servoId, ch.def->model);  // until boot identifies the bus
     ch.settings = teleop::defaultSettings(*ch.def);
@@ -172,7 +173,7 @@ void TeleopController::refuse(const char* format, ...) {
 }
 
 TeleopController::JointChannel* TeleopController::channelForServo(uint8_t servoId) {
-  const int index = teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
+  const int index = teleop::jointIndexForServo(hand::joints(), teleop::kMaxJoints, servoId);
   return index < 0 ? nullptr : &channels_[index];
 }
 
@@ -629,7 +630,7 @@ void TeleopController::handleCommand(const Command& c) {
       if (c.joint == 0) {
         disarmAll(Fault::None, -1, "operator");
       } else {
-        const int i = teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, c.joint);
+        const int i = teleop::jointIndexForServo(hand::joints(), teleop::kMaxJoints, c.joint);
         if (i < 0) {
           refuse("no joint with servo id %u", c.joint);
         } else if (!channels_[i].armed()) {
@@ -674,7 +675,7 @@ void TeleopController::handleSet(const Command& c) {
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) joints[i] = channels_[i].settings;
   teleop::GlobalSettings global = global_;
   const char* error =
-      teleop::applySetting(c, joints, config::kJoints, teleop::kMaxJoints, global, config::kEncoderCount);
+      teleop::applySetting(c, joints, hand::joints(), teleop::kMaxJoints, global, config::kEncoderCount);
   if (error != nullptr) {
     refuse("set rejected: %s", error);
     return;
@@ -873,7 +874,7 @@ void TeleopController::handleLimitsWrite(uint8_t servoId) {
 // ---- speed sweep --------------------------------------------------------------
 
 void TeleopController::handleSweep(uint8_t servoId) {
-  const int index = teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
+  const int index = teleop::jointIndexForServo(hand::joints(), teleop::kMaxJoints, servoId);
   if (index < 0) {
     refuse("no joint with servo id %u", servoId);
     return;
@@ -999,7 +1000,7 @@ void TeleopController::reportSweep(uint8_t index) {
 }
 
 void TeleopController::handleSweepApply(uint8_t servoId) {
-  const int index = teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
+  const int index = teleop::jointIndexForServo(hand::joints(), teleop::kMaxJoints, servoId);
   if (index < 0) {
     refuse("no joint with servo id %u", servoId);
     return;
@@ -1031,7 +1032,7 @@ void TeleopController::saveConfig() {
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) joints[i] = channels_[i].settings;
   uint8_t blob[teleop::kBlobSize];
   const size_t n =
-      teleop::packConfig(joints, config::kJoints, teleop::kMaxJoints, global_, blob, sizeof(blob));
+      teleop::packConfig(joints, hand::joints(), teleop::kMaxJoints, global_, blob, sizeof(blob));
   const bool ok = n > 0 && config_store::save(blob, n);
   event({EV::ConfigSaved, 0, ok ? SV::Info : SV::Error, {ok ? 1 : 0}}, ok ? "configuration saved to NVS" : "SAVE FAILED");
   if (!ok) cmdFailed_ = true;
@@ -1049,7 +1050,7 @@ bool TeleopController::loadConfig(bool atBoot) {
   teleop::GlobalSettings global;
   uint8_t badJoint = 0xFF;
   const teleop::BlobStatus status = teleop::unpackConfig(
-      blob, length, config::kJoints, teleop::kMaxJoints, config::kEncoderCount,
+      blob, length, hand::joints(), teleop::kMaxJoints, config::kEncoderCount,
       config::kGlobalDefaults, joints, global, &badJoint);
   if (!teleop::blobApplied(status)) {
     event({EV::ConfigLoaded, 0, SV::Error, {static_cast<int32_t>(status)}}, "stored configuration rejected (%s), %s", teleop::blobStatusToString(status),
@@ -1067,7 +1068,7 @@ bool TeleopController::loadConfig(bool atBoot) {
     event({EV::ConfigLoaded, 0, SV::Info, {static_cast<int32_t>(status)}}, "configuration loaded from NVS");
   } else if (badJoint < teleop::kMaxJoints) {
     event({EV::ConfigLoaded, 0, SV::Info, {static_cast<int32_t>(status)}}, "configuration loaded with corrections: %s (first: joint %u)",
-            teleop::blobStatusToString(status), config::kJoints[badJoint].servoId);
+            teleop::blobStatusToString(status), hand::joints()[badJoint].servoId);
   } else {
     event({EV::ConfigLoaded, 0, SV::Info, {static_cast<int32_t>(status)}}, "configuration loaded: %s; run `save` to store it in the new format",
             teleop::blobStatusToString(status));
@@ -1237,7 +1238,7 @@ void TeleopController::armAll() {
 }
 
 void TeleopController::armOne(uint8_t servoId) {
-  const int i = teleop::jointIndexForServo(config::kJoints, teleop::kMaxJoints, servoId);
+  const int i = teleop::jointIndexForServo(hand::joints(), teleop::kMaxJoints, servoId);
   if (i < 0) {
     refuse("no joint with servo id %u", servoId);
     return;
@@ -1312,7 +1313,7 @@ void TeleopController::torqueOffAll(const char* reason) {
   endSweep(reason);
   for (JointChannel& ch : channels_) ch.state = JointState::Off;
   uint8_t ids[teleop::kMaxJoints];
-  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) ids[i] = config::kJoints[i].servoId;
+  for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) ids[i] = hand::joints()[i].servoId;
   bus_.syncTorqueOff(ids, teleop::kMaxJoints);
   bool allConfirmed = true;
   for (const uint8_t id : ids) {
