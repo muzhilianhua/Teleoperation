@@ -108,3 +108,17 @@ def test_flat_backups_belong_to_the_right_hand(client: TestClient, tmp_path: Pat
     (tmp_path / "20261021-143005.txt").write_text(legacy + "\n")
     assert [b["name"] for b in client.get("/api/right/backups").json()] == ["20261021-143005.txt"]
     assert client.get("/api/left/backups").json() == []
+
+
+def test_power_summary_and_stream(client: TestClient) -> None:
+    deadline = time.monotonic() + 3
+    hands = {}
+    while not (set(hands) == {"right", "left"} and all(w["samples"] > 10 for w in hands.values())):
+        assert time.monotonic() < deadline, "no power windows"
+        time.sleep(0.05)
+        hands = client.get("/api/power").json()["hands"]
+    assert hands["right"]["min_v"] == 6.0 and hands["left"]["armed"] == 0
+    with client.websocket_connect("/ws") as ws:
+        assert "trips" in receive_until(ws, "snapshot")["data"]
+        power = receive_until(ws, "power")
+        assert set(power["data"]) == {"right", "left"}

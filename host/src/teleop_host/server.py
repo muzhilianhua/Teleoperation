@@ -15,6 +15,8 @@ server -> browser
   event      {hand, data}: one device event
   log        {hand, data}: one printed / unframed line
   notice     {data: {text}}: pairing problems (two boards on one hand)
+  power      {data: {hand: window}}: voltages and estimated supply current over the last second, POWER_HZ
+  trip       {data: record}: a fault switched joints off; both hands' power in the second before
   cmd_result reply to a `cmd`
 
 browser -> server
@@ -29,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import logging
 import math
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -48,12 +51,14 @@ from .link.link import LinkStatus
 from .link.serial_transport import SerialTransport
 from .link.transport import Transport
 from .plugins import Plugin
+from .power import PowerMonitor
 from .protocol.frames import UnframedText
 from .protocol.messages import DeviceInfo, Event, Log, SlowStatus, Telemetry, TelemetryJoint
 
 TEL_HZ = 30.0
 SLOW_HZ = 5.0
 PLOT_FLUSH_S = 0.05
+POWER_HZ = 5.0
 HISTORY_ON_CONNECT = 300
 
 # Plot channels per joint: name -> value from (joint record, deg per encoder count).
@@ -71,12 +76,15 @@ PLOT_CHANNELS: dict[str, Callable[[TelemetryJoint, float], float]] = {
     "current_ma": lambda j, k: j.current_ma,
     "supply_est_ma": lambda j, k: abs(j.current_ma) * abs(j.load_deci_pct) / 1000,
     "temp_c": lambda j, k: j.temperature_c,
+    "voltage_v": lambda j, k: j.voltage_deci_v / 10,
 }
 
 
 def to_json(obj: Any) -> Any:
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return {f.name: to_json(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
+    if isinstance(obj, dict):
+        return {str(k): to_json(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [to_json(v) for v in obj]
     if isinstance(obj, float) and not math.isfinite(obj):
@@ -120,9 +128,10 @@ class Client:
 class Hub:
     """Fans both hands' messages out to every connected browser."""
 
-    def __init__(self, hands: HandManager, plugins: list[Plugin]) -> None:
+    def __init__(self, hands: HandManager, plugins: list[Plugin], power: PowerMonitor) -> None:
         self.hands = hands
         self.plugins = plugins
+        self.power = power
         self.clients: set[Client] = set()
         self._last_tel: dict[str, float] = {}
         self._last_slow: dict[str, float] = {}
@@ -130,7 +139,9 @@ class Hub:
 
     def start(self) -> None:
         self.hands.subscribe(self.on_message)
+        self.power.on_trip(lambda r: self.broadcast({"type": "trip", "data": to_json(r)}))
         self._tasks.append(asyncio.create_task(self._flush_plots()))
+        self._tasks.append(asyncio.create_task(self._send_power()))
 
     async def stop(self) -> None:
         for task in self._tasks:
@@ -144,6 +155,7 @@ class Hub:
             client.push(message)
 
     def on_message(self, hand: str | None, m: Any) -> None:
+        self.power.on_message(hand, m)
         for plugin in self.plugins:
             with contextlib.suppress(Exception):
                 plugin.on_message(hand, m)
@@ -194,6 +206,12 @@ class Hub:
                 if client.plot_t:
                     client.push({"type": "plot", "data": {"t_us": client.plot_t, "series": client.plot_series}})
                     client.plot_t, client.plot_series = {}, {}
+
+    async def _send_power(self) -> None:
+        while True:
+            await asyncio.sleep(1 / POWER_HZ)
+            if self.clients:
+                self.broadcast({"type": "power", "data": to_json(self.power.summary())})
 
     def subscribe_plot(self, client: Client, keys: list[str]) -> None:
         parsed: dict[str, list[tuple[int, str, str]]] = {}
@@ -263,7 +281,8 @@ def create_app(
     sim_factories: dict[str, Callable[[], Transport]] | None = None,
     initial_ports: list[str] | None = None,
 ) -> FastAPI:
-    hub = Hub(hands, plugins)
+    power = PowerMonitor(lambda hand: d.info if (d := hands.device(hand)) else None)
+    hub = Hub(hands, plugins, power)
     sims = sim_factories or {}
 
     def factory_for(port: str) -> Callable[[], Transport]:
@@ -411,6 +430,10 @@ def create_app(
             raise HTTPException(409, str(exc)) from exc
         return {"ok": result.ok, "message": result.message, "mismatch": to_json(result.mismatch)}
 
+    @api.get("/power")
+    def power_state() -> dict[str, Any]:
+        return {"hands": to_json(power.summary()), "trips": to_json(list(power.trips))}
+
     @api.get("/plugins")
     def plugin_list() -> list[dict[str, str]]:
         return [p.describe() for p in plugins]
@@ -431,7 +454,12 @@ def create_app(
         client.push(
             {
                 "type": "snapshot",
-                "data": {"hands": {h: hand_state(hands, h) for h in HANDS}, "plugins": [p.describe() for p in plugins]},
+                "data": {
+                    "hands": {h: hand_state(hands, h) for h in HANDS},
+                    "plugins": [p.describe() for p in plugins],
+                    "power": to_json(power.summary()),
+                    "trips": to_json(list(power.trips)),
+                },
             }
         )
         sender = asyncio.create_task(_send_loop(ws, client))
@@ -481,6 +509,12 @@ def create_app(
 
 
 async def _send_loop(ws: WebSocket, client: Client) -> None:
-    with contextlib.suppress(Exception):
-        while True:
-            await ws.send_json(await client.queue.get())
+    while True:
+        message = await client.queue.get()
+        try:
+            await ws.send_json(message)
+        except (TypeError, ValueError):
+            # One message that does not serialise must not end the tab's stream.
+            logging.getLogger(__name__).exception("dropped a %s message", message.get("type"))
+        except Exception:  # noqa: BLE001  (the tab went away)
+            return
