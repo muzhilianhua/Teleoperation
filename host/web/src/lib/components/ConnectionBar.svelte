@@ -2,17 +2,22 @@
   import { api } from '../api';
   import { confirm } from '../confirm.svelte';
   import type { PortInfo } from '../protocol';
-  import { app } from '../state.svelte';
+  import { app, HAND_LABEL } from '../state.svelte';
 
+  // Boards join a hand by their own GPIO4 strap (HELLO), not by the port picked here.
   let ports = $state<PortInfo[]>([]);
+  let inUse = $state<string[]>([]);
   let selected = $state('');
   let busy = $state(false);
 
+  const free = $derived(ports.filter((p) => !inUse.includes(p.device)));
+
   async function refresh() {
     try {
-      const r = await api<{ ports: PortInfo[]; suggested: string | null }>('/ports');
+      const r = await api<{ ports: PortInfo[]; in_use: string[] }>('/ports');
       ports = r.ports;
-      if (!selected) selected = app.link.port || r.suggested || ports[0]?.device || '';
+      inUse = r.in_use;
+      if (!free.some((p) => p.device === selected)) selected = free.find((p) => p.is_esp32)?.device ?? free[0]?.device ?? '';
     } catch (e) {
       app.toast('error', `ports: ${(e as Error).message}`);
     }
@@ -21,7 +26,8 @@
   async function connect() {
     busy = true;
     try {
-      await api('/connect', { body: { port: selected || null } });
+      await api('/connect', { body: { port: selected } });
+      setTimeout(refresh, 300);
     } catch (e) {
       app.toast('error', `connect: ${(e as Error).message}`);
     } finally {
@@ -30,50 +36,48 @@
   }
 
   async function disconnect() {
+    const hand = app.current;
     if (
       app.armedCount > 0 &&
       !(await confirm({
-        title: 'Disconnect while armed?',
-        body: 'The device leaves the host link but keeps its joints armed and following the glove.',
+        title: `Disconnect the ${hand} hand while armed?`,
+        body: 'The board leaves the host link but keeps its joints armed and following the glove.',
         confirmText: 'Disconnect',
         danger: true,
       }))
     )
       return;
-    await api('/disconnect', { body: {} });
+    await api('/disconnect', { body: { hand } });
+    setTimeout(refresh, 300);
   }
 
   $effect(() => {
     if (app.wsConnected) refresh();
   });
-
-  const pillClass = $derived(
-    !app.wsConnected ? 'err' : app.link.state === 'connected' ? 'ok' : app.link.state === 'error' ? 'err' : 'warn',
-  );
-  const label = $derived(
-    !app.wsConnected ? 'GUI server offline' : app.link.state === 'connected' ? `connected · ${app.link.port}` : app.link.state,
-  );
+  $effect(() => {
+    // A board appearing or leaving changes which ports are free.
+    app.hands.right.link?.state;
+    app.hands.left.link?.state;
+    if (app.wsConnected) refresh();
+  });
 </script>
 
 <div class="row bar">
-  <span class="pill {pillClass}" title={app.link.detail}>● {label}</span>
-  {#if app.link.state === 'connected' && app.link.firmware}
-    <span class="muted mono" title="firmware build">{app.link.firmware}</span>
-  {/if}
-  {#if app.link.state !== 'connected'}
-    <select bind:value={selected} onfocus={refresh} disabled={!app.wsConnected}>
-      {#each ports as port (port.device)}
-        <option value={port.device}>{port.device}{port.is_esp32 ? ' (ESP32)' : ''}</option>
-      {/each}
-    </select>
-    <button class="primary" onclick={connect} disabled={busy || !app.wsConnected || app.link.state === 'connecting'}>
-      Connect
-    </button>
-    {#if app.link.detail && app.link.state !== 'connecting'}
-      <span class="hint detail" title={app.link.detail}>{app.link.detail}</span>
-    {/if}
+  {#if !app.wsConnected}
+    <span class="pill err">GUI server offline</span>
   {:else}
-    <button class="ghost small" onclick={disconnect}>Disconnect</button>
+    {#if app.hand.link}
+      <span class="muted mono port" title={app.link.detail || app.link.firmware}>{app.hand.port}{app.link.firmware ? ` · ${app.link.firmware}` : ''}</span>
+      <button class="ghost small" onclick={disconnect}>Disconnect {HAND_LABEL[app.current].toLowerCase()}</button>
+    {/if}
+    {#if free.length && (!app.hands.right.link || !app.hands.left.link)}
+      <select bind:value={selected} onfocus={refresh} aria-label="Serial port">
+        {#each free as port (port.device)}
+          <option value={port.device}>{port.device}{port.is_esp32 ? ' (ESP32)' : ''}</option>
+        {/each}
+      </select>
+      <button class="primary small" onclick={connect} disabled={busy || !selected}>Connect board</button>
+    {/if}
   {/if}
 </div>
 
@@ -82,8 +86,8 @@
     flex-wrap: nowrap;
     min-width: 0;
   }
-  .detail {
-    max-width: 320px;
+  .port {
+    max-width: 260px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

@@ -30,7 +30,7 @@
 
   async function refresh() {
     try {
-      backups = await api<BackupMeta[]>('/backups');
+      backups = await api<BackupMeta[]>(`/${app.current}/backups`);
     } catch (e) {
       app.toast('error', (e as Error).message);
     }
@@ -50,7 +50,7 @@
 
   async function createBackup() {
     try {
-      const b = await api<BackupMeta>('/backups', { body: { tag, note } });
+      const b = await api<BackupMeta>(`/${app.current}/backups`, { body: { tag, note } });
       app.toast('success', `saved ${b.name}`);
       tag = note = '';
       await refresh();
@@ -61,7 +61,7 @@
 
   async function importPasted() {
     try {
-      const b = await api<BackupMeta>('/backups/import', { body: { text: pasted, tag: tag || 'imported', note } });
+      const b = await api<BackupMeta>(`/${app.current}/backups/import`, { body: { text: pasted, tag: tag || 'imported', note } });
       app.toast('success', `imported as ${b.name}`);
       pasted = '';
       await refresh();
@@ -75,7 +75,7 @@
     message = '';
     changes = null;
     try {
-      changes = (await api<{ changes: Change[] }>(`/backups/${encodeURIComponent(name)}/diff`, { body: {} })).changes;
+      changes = (await api<{ changes: Change[] }>(`/${app.current}/backups/${encodeURIComponent(name)}/diff`, { body: {} })).changes;
     } catch (e) {
       message = (e as Error).message;
     }
@@ -93,7 +93,7 @@
     )
       return;
     try {
-      const r = await api<{ ok: boolean; message: string }>(`/backups/${encodeURIComponent(name)}/restore`, { body: { save: restoreSave } });
+      const r = await api<{ ok: boolean; message: string }>(`/${app.current}/backups/${encodeURIComponent(name)}/restore`, { body: { save: restoreSave } });
       message = r.message;
       app.toast(r.ok ? 'success' : 'error', r.message, 6000);
       if (r.ok) await diff(name);
@@ -150,7 +150,7 @@
               <td class="row">
                 <button class="small" onclick={() => diff(b.name)}>Diff</button>
                 <button class="small danger" disabled={armed} onclick={() => restore(b.name)}>Restore</button>
-                <a class="small" href={`/api/backups/${encodeURIComponent(b.name)}/download`} download={b.name}>Download</a>
+                <a class="small" href={`/api/${app.current}/backups/${encodeURIComponent(b.name)}/download`} download={b.name}>Download</a>
               </td>
             </tr>
           {:else}

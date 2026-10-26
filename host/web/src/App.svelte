@@ -3,8 +3,9 @@
   import ConfirmDialog from './lib/components/ConfirmDialog.svelte';
   import ConnectionBar from './lib/components/ConnectionBar.svelte';
   import EStopButton from './lib/components/EStopButton.svelte';
+  import HandSwitcher from './lib/components/HandSwitcher.svelte';
   import Toasts from './lib/components/Toasts.svelte';
-  import { run } from './lib/commands';
+  import { runOnAllHands } from './lib/commands';
   import { HandFlag, has } from './lib/protocol';
   import { app } from './lib/state.svelte';
   import { corePages, placeholderPage, pluginPages, type PageDef } from './plugins/registry';
@@ -45,13 +46,16 @@
 <div class="shell">
   <header class="top">
     <div class="brand">Teleop<span class="muted">Console</span></div>
+    <HandSwitcher />
     <ConnectionBar />
     <div class="spacer"></div>
     {#if app.connected}
-      <span class="pill {app.armedCount > 0 ? 'warn' : ''}">{app.armedCount} armed</span>
       {#if sweeping}<span class="pill info">sweep running</span>{/if}
-      {#if handFault}<span class="pill err" title="last hand-level fault">{handFault}</span>{/if}
-      <button class="ghost" onclick={() => run('disarm')} disabled={app.armedCount === 0}>Disarm all</button>
+      {#if handFault}<span class="pill err" title="last hand-level fault of this hand">{handFault}</span>{/if}
+    {/if}
+    {#if app.connectedHands.length}
+      <span class="pill {app.armedTotal > 0 ? 'warn' : ''}" title="both hands">{app.armedTotal} armed</span>
+      <button class="ghost" onclick={() => runOnAllHands('disarm')} disabled={app.armedTotal === 0} title="every joint of both hands">Disarm all</button>
     {/if}
     <EStopButton />
   </header>

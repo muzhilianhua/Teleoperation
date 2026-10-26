@@ -1,10 +1,23 @@
-// One WebSocket to teleop-host: state updates in, commands / E-stop out.
+// One WebSocket to teleop-host: both hands' state in, commands / E-stop out.
 
-import { app } from './state.svelte';
+import { app, HANDS, type HandId } from './state.svelte';
 import type { CommandResult, DeviceEvent } from './protocol';
 
-type PlotBatch = { t_us: number[]; series: Record<string, number[]> };
+// t_us per hand; series keys are "<hand>.j<id>.<channel>".
+export type PlotBatch = { t_us: Partial<Record<HandId, number[]>>; series: Record<string, number[]> };
 type PlotListener = (batch: PlotBatch) => void;
+
+const unreachable = (text: string, error = 'GUI server unreachable'): CommandResult => ({
+  text,
+  ok: false,
+  status: 'not_connected',
+  error,
+  events: [],
+  logs: [],
+  config: null,
+});
+
+const isHand = (h: unknown): h is HandId => h === 'right' || h === 'left';
 
 class Socket {
   private ws: WebSocket | null = null;
@@ -25,9 +38,7 @@ class Socket {
     };
     ws.onclose = () => {
       app.wsConnected = false;
-      for (const resolve of this.pending.values()) {
-        resolve({ text: '', ok: false, status: 'not_connected', error: 'GUI server unreachable', events: [], logs: [], config: null });
-      }
+      for (const resolve of this.pending.values()) resolve(unreachable(''));
       this.pending.clear();
       setTimeout(() => this.start(), this.retryMs);
       this.retryMs = Math.min(this.retryMs * 2, 5000);
@@ -41,36 +52,50 @@ class Socket {
     return true;
   }
 
-  private dispatch(m: { type: string; data: any; id?: number }): void {
+  private dispatch(m: { type: string; hand?: string | null; port?: string; data: any; id?: number }): void {
+    // Messages from a board whose HELLO has not arrived yet go to the selected hand's log.
+    const hand = isHand(m.hand) ? app.hands[m.hand] : null;
     switch (m.type) {
       case 'snapshot':
-        app.link = m.data.link;
-        app.info = m.data.info;
-        app.slow = m.data.slow;
-        app.tel = m.data.tel;
         app.plugins = m.data.plugins;
-        app.events = [];
-        app.logs = [];
-        app.addEvents(m.data.events);
-        app.addLogs(m.data.logs.map((text: string) => ({ source: 0, text })));
+        for (const h of HANDS) {
+          const s = m.data.hands[h];
+          const state = app.hands[h];
+          state.link = s.link;
+          state.port = s.port;
+          state.info = s.info;
+          state.slow = s.slow;
+          state.tel = s.tel;
+          state.events = [];
+          state.logs = [];
+          state.addEvents(s.events);
+          state.addLogs(s.logs.map((text: string) => ({ source: 0, text })));
+        }
         break;
       case 'link':
-        app.link = m.data;
+        if (hand) {
+          hand.link = m.data;
+          hand.port = m.port ?? hand.port;
+          if (m.data.state === 'disconnected' && !m.data.port) hand.clear();
+        }
         break;
       case 'info':
-        app.info = m.data;
+        if (hand) hand.info = m.data;
         break;
       case 'tel':
-        app.tel = m.data;
+        if (hand) hand.tel = m.data;
         break;
       case 'slow':
-        app.slow = m.data;
+        if (hand) hand.slow = m.data;
         break;
       case 'event':
-        app.addEvents([m.data as DeviceEvent]);
+        (hand ?? app.hand).addEvents([m.data as DeviceEvent]);
         break;
       case 'log':
-        app.addLogs([m.data]);
+        (hand ?? app.hand).addLogs([m.data]);
+        break;
+      case 'notice':
+        app.toast('error', m.data.text, 10000);
         break;
       case 'plot':
         for (const listener of this.plotListeners) listener(m.data);
@@ -84,17 +109,18 @@ class Socket {
     }
   }
 
-  command(text: string): Promise<CommandResult> {
+  command(text: string, hand: HandId = app.current): Promise<CommandResult> {
     const id = this.nextId++;
     return new Promise((resolve) => {
-      if (!this.send({ type: 'cmd', id, text })) {
-        resolve({ text, ok: false, status: 'not_connected', error: 'GUI server unreachable', events: [], logs: [], config: null });
+      if (!this.send({ type: 'cmd', id, hand, text })) {
+        resolve(unreachable(text));
         return;
       }
       this.pending.set(id, resolve);
     });
   }
 
+  // Both hands: the server forwards it to every connected board.
   estop(): boolean {
     return this.send({ type: 'estop' });
   }

@@ -72,6 +72,7 @@
           {#each app.activity.slice(0, 50) as a (a.id)}
             <tr>
               <td class="num muted">{new Date(a.time).toLocaleTimeString()}</td>
+              <td>{a.hand}</td>
               <td class="mono">{a.text}</td>
               <td><span class="pill {a.ok ? 'ok' : 'err'}">{a.ok ? 'ok' : 'failed'}</span></td>
               <td class="hint">{a.detail}</td>

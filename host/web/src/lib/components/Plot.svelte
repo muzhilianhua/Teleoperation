@@ -11,7 +11,7 @@
     time,
     series,
     version,
-  }: { title: string; unit?: string; time: number[]; series: { label: string; data: number[] }[]; version: number } =
+  }: { title: string; unit?: string; time: number[]; series: { label: string; data: (number | null)[] }[]; version: number } =
     $props();
 
   const COLORS = ['#5b9cf6', '#3fb97f', '#e0a23a', '#ef5d55', '#b78cf2', '#4fc1c9', '#f28cb1', '#c2c86b', '#9aa3b2'];
@@ -31,7 +31,7 @@
         { stroke: '#959eae', grid: { stroke: '#2b313c' }, size: 60 },
       ],
       legend: { live: true },
-      series: [{ label: 't' }, ...series.map((s, i) => ({ label: s.label, stroke: COLORS[i % COLORS.length], width: 1.5, points: { show: false } }))],
+      series: [{ label: 't' }, ...series.map((s, i) => ({ label: s.label, stroke: COLORS[i % COLORS.length], width: 1.5, points: { show: false }, spanGaps: true }))],
     };
     plot = new uPlot(opts, [time, ...series.map((s) => s.data)], el);
   }

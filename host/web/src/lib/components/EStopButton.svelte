@@ -9,7 +9,7 @@
 
 <svelte:window onkeydown={onKey} />
 
-<button class="estop" onclick={estop} title="Torque off on every servo (Esc)">
+<button class="estop" onclick={estop} title="Torque off on every servo of both hands (Esc)">
   E-STOP <span class="key">Esc</span>
 </button>
 
