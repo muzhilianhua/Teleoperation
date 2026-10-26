@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HandTag from '../lib/components/HandTag.svelte';
   import TravelBar from '../lib/components/TravelBar.svelte';
   import { run } from '../lib/commands';
   import { confirm } from '../lib/confirm.svelte';
@@ -21,10 +22,15 @@
   // Encoder activity over the last 3 s, to spot which one the operator is moving.
   const WINDOW_MS = 3000;
   let history: { t: number; angles: number[] }[] = [];
+  let historyHand = app.current;
   let activity = $state<number[]>([]);
   $effect(() => {
     const encoders = app.slow?.encoders;
     if (!encoders) return;
+    if (historyHand !== app.current) {
+      history = []; // the other hand's encoders
+      historyHand = app.current;
+    }
     const now = Date.now();
     history.push({ t: now, angles: encoders.map((e) => e.angle) });
     history = history.filter((h) => now - h.t <= WINDOW_MS);
@@ -80,6 +86,7 @@
 <div class="page">
   <div class="page-header">
     <h1>Calibration</h1>
+    <HandTag />
     <p>Per joint, disarmed: assign the encoder, capture servo and exo endpoints, home multi-turn joints, enable, save.</p>
   </div>
 

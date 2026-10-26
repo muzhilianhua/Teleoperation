@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HandTag from '../lib/components/HandTag.svelte';
   import { run } from '../lib/commands';
   import { jointViews } from '../lib/joints.svelte';
   import { app } from '../lib/state.svelte';
@@ -13,6 +14,7 @@
 <div class="page">
   <div class="page-header">
     <h1>Diagnostics</h1>
+    <HandTag />
     <p>Control loop, servo bus, encoder bus and host link statistics (the console's <code>stats</code>).</p>
   </div>
   {#if !app.connected || !s}

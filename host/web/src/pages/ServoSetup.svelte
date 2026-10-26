@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HandTag from '../lib/components/HandTag.svelte';
   import ParamField from '../lib/components/ParamField.svelte';
   import { run } from '../lib/commands';
   import { confirm } from '../lib/confirm.svelte';
@@ -63,6 +64,7 @@
 <div class="page">
   <div class="page-header">
     <h1>Servo setup</h1>
+    <HandTag />
     <p>Identify the servos, sync their angle-limit registers with the travel, measure speed limits and set HLS current limits.</p>
   </div>
 

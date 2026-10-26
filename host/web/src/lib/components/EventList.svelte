@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { app } from '../state.svelte';
+  import { app, type HandId } from '../state.svelte';
 
-  let { limit = 40, joint = 0 }: { limit?: number; joint?: number } = $props();
+  let { limit = 40, joint = 0, hand }: { limit?: number; joint?: number; hand?: HandId } = $props();
+  const h = $derived(app.hands[hand ?? app.current]);
 
   const events = $derived(
-    app.events.filter((e) => !joint || e.joint === joint || e.joint === 0).slice(-limit).reverse(),
+    h.events.filter((e) => !joint || e.joint === joint || e.joint === 0).slice(-limit).reverse(),
   );
   const sevClass = ['info', 'warn', 'err'];
   const time = (t: number) => new Date(t).toLocaleTimeString();
@@ -14,7 +15,7 @@
   {#each events as e (e.id)}
     <div class="ev {sevClass[e.severity] ?? ''}">
       <span class="t num">{time(e.time)}</span>
-      <span class="code">{app.info?.events[e.code] ?? e.code}</span>
+      <span class="code">{h.info?.events[e.code] ?? e.code}</span>
       <span class="text">{e.text}</span>
     </div>
   {:else}

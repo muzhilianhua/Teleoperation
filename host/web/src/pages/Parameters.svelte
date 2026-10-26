@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HandTag from '../lib/components/HandTag.svelte';
   import ParamField from '../lib/components/ParamField.svelte';
   import { run } from '../lib/commands';
   import { jointViews } from '../lib/joints.svelte';
@@ -24,6 +25,7 @@
 <div class="page">
   <div class="page-header">
     <h1>Parameters</h1>
+    <HandTag />
     <p>Per-joint motion, tracking, grip and current settings (live, also while armed) and the global filter / grip settings. Values are in each servo's own steps. Enter or leave a field to apply; <b>Save</b> to keep them.</p>
   </div>
 

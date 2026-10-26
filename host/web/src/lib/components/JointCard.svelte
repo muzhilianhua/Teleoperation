@@ -22,11 +22,11 @@
     <span class="name" title={joint.info.name}>{joint.info.name}</span>
     <span class="pill">{modelShort(joint.info.model)}</span>
     <span class="spacer"></span>
-    <span class="state pill {STATE_CLASS[t?.state ?? 0]}">{stateName(t?.state)}</span>
+    <span class="state pill {STATE_CLASS[t?.state ?? 0]}">{stateName(t?.state, joint.hand)}</span>
   </div>
 
   <div class="values">
-    <div><span class="k">exo</span><span class="num">{fmt(exoDeg(app.info, t?.exo_filtered_counts ?? NaN), 1)}°</span></div>
+    <div><span class="k">exo</span><span class="num">{fmt(exoDeg(app.hands[joint.hand].info, t?.exo_filtered_counts ?? NaN), 1)}°</span></div>
     <div><span class="k">target</span><span class="num">{fmt(t?.target)}</span></div>
     <div><span class="k">sent</span><span class="num">{fmt(t?.sent_goal)}</span></div>
     <div><span class="k">present</span><span class="num">{t ? t.position : '—'}</span></div>
@@ -61,19 +61,19 @@
   </div>
 
   <div class="fault" role="status">
-    {#if t && t.fault}last off: {faultName(t.fault)}{/if}
+    {#if t && t.fault}last off: {faultName(t.fault, joint.hand)}{/if}
   </div>
 
   <div class="actions row">
     {#if armed}
-      <button class="small" onclick={() => run(`disarm ${joint.info.servo_id}`)}>Disarm</button>
+      <button class="small" onclick={() => run(`disarm ${joint.info.servo_id}`, { hand: joint.hand })}>Disarm</button>
     {:else}
-      <button class="small primary" disabled={!has(flags, JointFlag.READY)} onclick={() => run(`arm ${joint.info.servo_id}`)}>
+      <button class="small primary" disabled={!has(flags, JointFlag.READY)} onclick={() => run(`arm ${joint.info.servo_id}`, { hand: joint.hand })}>
         Arm
       </button>
     {/if}
     {#if multiTurnUnhomed && !armed}
-      <button class="small" onclick={() => run(`home ${joint.info.servo_id}`)} title="glove held at pose A">Home</button>
+      <button class="small" onclick={() => run(`home ${joint.info.servo_id}`, { hand: joint.hand })} title="glove held at pose A">Home</button>
     {/if}
   </div>
 </div>

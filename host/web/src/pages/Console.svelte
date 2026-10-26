@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HandTag from '../lib/components/HandTag.svelte';
   import { tick } from 'svelte';
   import { run } from '../lib/commands';
   import { app } from '../lib/state.svelte';
@@ -52,6 +53,7 @@
 <div class="page full">
   <div class="page-header">
     <h1>Console</h1>
+    <HandTag />
     <p>Any text console command, as on the serial port. Tables print here; events show as <code>[ctl]</code>.</p>
   </div>
   <div class="row">

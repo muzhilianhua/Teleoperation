@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HandTag from '../lib/components/HandTag.svelte';
   import { run } from '../lib/commands';
   import { jointViews } from '../lib/joints.svelte';
   import { app } from '../lib/state.svelte';
@@ -13,6 +14,7 @@
 <div class="page">
   <div class="page-header">
     <h1>Encoders</h1>
+    <HandTag />
     <p>AS5048B channels on the I²C bus, with the joint each one drives. The monitor also reads every servo's position (disarmed only).</p>
   </div>
   {#if !app.connected || !slow}

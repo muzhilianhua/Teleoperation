@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HandTag from '../lib/components/HandTag.svelte';
   import { api } from '../lib/api';
   import { run } from '../lib/commands';
   import { confirm } from '../lib/confirm.svelte';
@@ -108,6 +109,7 @@
 <div class="page">
   <div class="page-header">
     <h1>Config store</h1>
+    <HandTag />
     <p>NVS on the device and calibration backups on this computer (<code>calib/*.txt</code>, the same files as <code>tools/calib.py</code>).</p>
   </div>
   {#if !app.connected}
