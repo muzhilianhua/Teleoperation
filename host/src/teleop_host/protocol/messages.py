@@ -255,6 +255,8 @@ class DeviceInfo:
     states: list[str]
     events: list[str]
     models: list[str]
+    hand: int = 0  # 0 unknown, 1 right, 2 left
+    board_id: str = ""  # MAC address of the board
 
     _HEAD = struct.Struct("<HfBHHBBBii")
 
@@ -289,7 +291,8 @@ class DeviceInfo:
                 j.degrees_per_step,
             )
             out += _str8(j.name)
-        return out + _names(self.faults) + _names(self.states) + _names(self.events) + _names(self.models)
+        out += _names(self.faults) + _names(self.states) + _names(self.events) + _names(self.models)
+        return out + bytes([self.hand]) + _str8(self.board_id)
 
     @classmethod
     def decode(cls, data: bytes) -> DeviceInfo:
@@ -302,7 +305,11 @@ class DeviceInfo:
             values = r.take(JointInfo._S)
             joints.append(JointInfo(*values, name=r.str8()))
         tables = [[r.str8() for _ in range(r.u8())] for _ in range(4)]
-        return cls(protocol, firmware, *head, joints, *tables)
+        info = cls(protocol, firmware, *head, joints, *tables)
+        if not r.done():  # firmware with two-hand support appends hand and board id
+            info.hand = r.u8()
+            info.board_id = r.str8()
+        return info
 
 
 # ---- TELEMETRY -----------------------------------------------------------------

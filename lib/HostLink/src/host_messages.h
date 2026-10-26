@@ -102,6 +102,9 @@ struct DeviceInfo {
   NameTable states;   // index = JointState
   NameTable events;   // index = EventCode
   NameTable models;   // index = feetech::ServoModel
+  // Appended after the name tables (hosts that predate them ignore the tail).
+  uint8_t hand = 0;          // 0 unknown, 1 right, 2 left (config::Hand)
+  const char* boardId = "";  // MAC address, identifies the board across ports
 };
 
 // Returns the payload length, 0 if it does not fit.

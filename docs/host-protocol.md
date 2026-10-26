@@ -82,7 +82,10 @@ jointCount u8, then per joint:
   servoId u8 | model u8 | travelMin i16 | travelMax i16 | vmax u16 | vsat u16 | amax u16
   maxSpeed u16 | encoderDefault u8 | enabledDefault u8 | stepScale f32 | degreesPerStep f32 | name str8
 name tables, each count u8 + str8 per entry: faults, joint states, event codes, servo models
+hand u8 (0 unknown, 1 right, 2 left: the GPIO4 strap) | boardId str8 (MAC, hex)
 ```
+
+`hand` and `boardId` were appended for two-hand setups. A host must accept a HELLO that ends after the name tables (older firmware) and treat it as hand 0. The host binds each board to a hand by `hand`, never by port name.
 
 The joint table comes from `config.h`, so the host needs no copy of it. `model` is `0` unknown, `1` SCS0009 or `2` HLS3606.
 

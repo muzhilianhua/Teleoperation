@@ -52,6 +52,8 @@ size_t encodeHello(const DeviceInfo& info, uint8_t* out, size_t capacity) {
   writeNames(w, info.states);
   writeNames(w, info.events);
   writeNames(w, info.models);
+  w.u8(info.hand);
+  w.str8(info.boardId);
   return finish(w);
 }
 

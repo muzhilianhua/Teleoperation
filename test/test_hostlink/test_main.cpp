@@ -376,6 +376,8 @@ void test_hello_golden_vector() {
   info.states = {states, 2};
   info.events = {events, 1};
   info.models = {models, 3};
+  info.hand = 2;
+  info.boardId = "a0b1c2d3e4f5";
   uint8_t out[512];
   const size_t n = encodeHello(info, out, sizeof(out));
   assertBytes(kGoldenHelloHex, out, n);

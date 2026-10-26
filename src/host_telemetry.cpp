@@ -99,6 +99,11 @@ const hostlink::DeviceInfo& deviceInfo() {
   info.states = {states, kStateCount};
   info.events = {kEventNames, static_cast<uint8_t>(hostlink::EventCode::Count)};
   info.models = {models, kModelCount};
+  static char boardId[13];
+  const uint64_t mac = ESP.getEfuseMac();
+  for (int i = 0; i < 6; ++i) snprintf(boardId + 2 * i, 3, "%02x", static_cast<unsigned>((mac >> (8 * i)) & 0xFF));
+  info.hand = static_cast<uint8_t>(hand::which());
+  info.boardId = boardId;
   built = true;
   return info;
 }

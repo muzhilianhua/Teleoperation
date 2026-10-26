@@ -104,7 +104,7 @@ def sample_hello() -> DeviceInfo:
     joint = JointInfo(2, 2, 794, 1911, 1333, 167, 26666, 12492, 2, 0, 3.25, 0.087890625, "thumb_near")
     return DeviceInfo(
         1, "abc1234", 100, 360 / 16384, 9, 7, 13306, 50, 100, 90, 182, 49152, [joint],
-        ["none", "comm lost"], ["OFF", "ALIGN"], ["generic"], ["unknown", "SCS0009", "HLS3606"],
+        ["none", "comm lost"], ["OFF", "ALIGN"], ["generic"], ["unknown", "SCS0009", "HLS3606"], 2, "a0b1c2d3e4f5",
     )  # fmt: skip
 
 
@@ -137,6 +137,9 @@ def test_hello_golden() -> None:
     assert sample_hello().encode() == golden("kGoldenHelloHex")
     info = decode_device_message(MsgType.HELLO, golden("kGoldenHelloHex"))
     assert info == sample_hello()
+    # Firmware before the hand fields: they stay at their defaults.
+    legacy = DeviceInfo.decode(golden("kGoldenHelloHex")[: -(2 + 12)])
+    assert legacy.hand == 0 and legacy.board_id == ""
 
 
 def test_telemetry_golden() -> None:
