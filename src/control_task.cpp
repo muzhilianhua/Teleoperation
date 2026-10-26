@@ -56,6 +56,12 @@ const char* jointStateToString(JointState state) {
 TeleopController::TeleopController(ServoBus& bus, FeetechPort& port, AS5048BGroup& encoders)
     : bus_(bus), port_(port), encoders_(encoders) {
   global_ = config::kGlobalDefaults;
+}
+
+// Not in the constructor: the controller is a global, constructed before
+// setup() reads the GPIO4 hand strap, so hand::joints() would still be the
+// right hand's table on a left-hand board.
+void TeleopController::bindJointTable() {
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     JointChannel& ch = channels_[i];
     ch.def = &hand::joints()[i];
@@ -72,6 +78,7 @@ TeleopController::TeleopController(ServoBus& bus, FeetechPort& port, AS5048BGrou
 
 bool TeleopController::begin() {
   instance_ = this;
+  bindJointTable();
   commands_ = xQueueCreate(32, sizeof(QueuedCommand));
   messages_ = xQueueCreate(64, sizeof(hostlink::Event));
   completions_ = xQueueCreate(32, sizeof(Completion));

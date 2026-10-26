@@ -61,6 +61,9 @@ void setup() {
   Wire.setTimeOut(config::kI2cTimeoutMs);
   Serial.printf("[boot] hand: %s (GPIO%d %s)\n", hand::name(), config::kHandStrapPin,
                 hand::which() == config::Hand::Left ? "to GND" : "open");
+  if (hand::usedBeforeSelect()) {
+    Serial.println("[boot] BUG: the hand's tables were read before the GPIO4 strap; settings may be the right hand's");
+  }
   AS5048B* encoders = hand::which() == config::Hand::Left ? leftEncoders : rightEncoders;
   for (uint8_t i = 0; i < config::kEncoderCount; ++i) {
     snprintf(encoderNames[i], sizeof(encoderNames[i]), "E%02X", hand::encoderAddresses()[i]);

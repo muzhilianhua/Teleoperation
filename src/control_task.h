@@ -128,8 +128,9 @@ class TeleopController {
  public:
   TeleopController(ServoBus& bus, FeetechPort& port, AS5048BGroup& encoders);
 
-  // Call from setup(): creates queues, arms the E-stop interrupt, loads the
-  // stored settings, switches every hand servo to torque-off and pings them.
+  // Call from setup() after hand::select(): binds this hand's joint table,
+  // creates queues, arms the E-stop interrupt, loads the stored settings,
+  // switches every hand servo to torque-off and pings them.
   bool begin();
   void startTask();
 
@@ -236,6 +237,7 @@ class TeleopController {
   void saveConfig();
   bool loadConfig(bool atBoot);
   void loadDefaults();
+  void bindJointTable();
   void resetChannelRuntime(JointChannel& ch);
   void applyRuntimeParams(JointChannel& ch);
   JointChannel* channelForServo(uint8_t servoId);

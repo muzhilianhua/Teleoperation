@@ -16,5 +16,8 @@ const uint8_t* encoderAddresses();
 // NVS key of this hand's settings: the right hand keeps the single-hand key,
 // so calibrations stored before the second hand existed stay valid.
 const char* storeKey();
+// True if anything read the hand's tables before select(): such a reader got
+// the right hand's even on a left-hand board. setup() reports it.
+bool usedBeforeSelect();
 
 }  // namespace hand

@@ -6,26 +6,36 @@ namespace hand {
 
 namespace {
 config::Hand selected = config::Hand::Right;
+bool isSelected = false;
+bool earlyUse = false;
+
+config::Hand current() {
+  if (!isSelected) earlyUse = true;
+  return selected;
+}
 }  // namespace
 
 void select() {
   pinMode(config::kHandStrapPin, INPUT_PULLUP);
   delayMicroseconds(50);  // let the pull-up settle
   selected = digitalRead(config::kHandStrapPin) == LOW ? config::Hand::Left : config::Hand::Right;
+  isSelected = true;
 }
 
-config::Hand which() { return selected; }
+bool usedBeforeSelect() { return earlyUse; }
 
-const char* name() { return selected == config::Hand::Left ? "left" : "right"; }
+config::Hand which() { return current(); }
+
+const char* name() { return current() == config::Hand::Left ? "left" : "right"; }
 
 const teleop::JointDefaults* joints() {
-  return selected == config::Hand::Left ? config::kLeftJoints : config::kRightJoints;
+  return current() == config::Hand::Left ? config::kLeftJoints : config::kRightJoints;
 }
 
 const uint8_t* encoderAddresses() {
-  return selected == config::Hand::Left ? config::kLeftEncoderAddresses : config::kRightEncoderAddresses;
+  return current() == config::Hand::Left ? config::kLeftEncoderAddresses : config::kRightEncoderAddresses;
 }
 
-const char* storeKey() { return selected == config::Hand::Left ? "cfg_l" : "cfg"; }
+const char* storeKey() { return current() == config::Hand::Left ? "cfg_l" : "cfg"; }
 
 }  // namespace hand
