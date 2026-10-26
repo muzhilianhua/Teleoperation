@@ -37,8 +37,8 @@ CONTROL_HZ = 100
 class FakeDevice:
     """Transport interface: write(), read(timeout), close()."""
 
-    def __init__(self, model: HandModel | None = None, realtime: bool = True) -> None:
-        self.model = model or HandModel()
+    def __init__(self, model: HandModel | None = None, realtime: bool = True, hand: str = "right") -> None:
+        self.model = model or HandModel(hand=hand)
         self.realtime = realtime
         self._out: queue.Queue[bytes] = queue.Queue()
         self._in: queue.Queue[bytes] = queue.Queue()

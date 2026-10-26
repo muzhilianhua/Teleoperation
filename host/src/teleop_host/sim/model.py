@@ -156,8 +156,12 @@ JOINT_NUMBER_KEYS = {"vmax", "amax", "vsat", "trk", "grip", "ilimit", "itrip"}
 GLOBAL_KEYS = {"lead": "lead_ms", "mincut": "min_cutoff_hz", "beta": "beta", "jump": "jump_deg", "gripload": "gripload"}
 
 
+HAND_CODES = {"right": 1, "left": 2}
+
+
 class HandModel:
-    def __init__(self, table: list[JointDefaults] | None = None) -> None:
+    def __init__(self, table: list[JointDefaults] | None = None, hand: str = "right") -> None:
+        self.hand = hand
         self.table = table or DEFAULT_TABLE
         self.joints = [Joint(d, default_settings(d), position=(d.travel_min + d.travel_max) / 2) for d in self.table]
         for j in self.joints:
@@ -211,6 +215,8 @@ class HandModel:
             STATE_NAMES,
             EVENT_NAMES,
             MODEL_NAMES,
+            HAND_CODES[self.hand],
+            f"5ab0c0ffee0{HAND_CODES[self.hand]}",
         )
 
     def encoder_raw(self, index: int) -> int:
@@ -446,7 +452,7 @@ class HandModel:
         self._result.config = self.dump()
 
     def dump(self) -> str:
-        out = ["defaults"]
+        out = ["defaults", f"# hand {self.hand}"]
         for j in self.joints:
             s, i = j.s, j.d.servo_id
             out.append(f"# {i} {j.d.name}")

@@ -73,6 +73,7 @@ def test_handshake_and_streams() -> None:
     s = Session()
     info = s.open()
     assert len(info.joints) == 9 and info.models[2] == "HLS3606"
+    assert info.hand == 1 and info.board_id
     for _ in range(10):
         s.dev.step(s.now)
     msgs = s.receive()
@@ -114,7 +115,7 @@ def test_dump_returns_config_frame() -> None:
     s.open()
     msgs = s.command("dump")
     config = next(m for m in msgs if isinstance(m, Config))
-    assert config.text.startswith("defaults\n# 1 sim_j1\nset 1 enc 3\n")
+    assert config.text.startswith("defaults\n# hand right\n# 1 sim_j1\nset 1 enc 3\n")
     assert config.text.rstrip().endswith("# end of dump: run `save` to store it")
     assert done(msgs).ok
 
@@ -138,3 +139,12 @@ def test_estop_frame() -> None:
     msgs = s.receive()
     assert any(isinstance(m, Event) and m.code == EventCode.TORQUE_OFF for m in msgs)
     assert Ack(seq, AckStatus.ACCEPTED) in msgs
+
+
+def test_left_hand_simulator() -> None:
+    s = Session()
+    s.dev = FakeDevice(realtime=False, hand="left")
+    info = s.open()
+    assert info.hand == 2
+    config = next(m for m in s.command("dump") if isinstance(m, Config))
+    assert "# hand left" in config.text
