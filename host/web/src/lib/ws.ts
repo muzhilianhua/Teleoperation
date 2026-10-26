@@ -58,6 +58,8 @@ class Socket {
     switch (m.type) {
       case 'snapshot':
         app.plugins = m.data.plugins;
+        app.power = m.data.power ?? {};
+        app.trips = [...(m.data.trips ?? [])].reverse();
         for (const h of HANDS) {
           const s = m.data.hands[h];
           const state = app.hands[h];
@@ -93,6 +95,13 @@ class Socket {
         break;
       case 'log':
         (hand ?? app.hand).addLogs([m.data]);
+        break;
+      case 'power':
+        app.power = m.data;
+        break;
+      case 'trip':
+        app.trips = [m.data, ...app.trips].slice(0, 50);
+        app.toast('error', `${m.data.hand} hand: ${m.data.fault} (see Power)`, 6000);
         break;
       case 'notice':
         app.toast('error', m.data.text, 10000);

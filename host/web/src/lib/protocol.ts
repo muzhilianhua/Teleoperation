@@ -229,3 +229,25 @@ export const EventCode = {
 export const JointState = { OFF: 0, ALIGN: 1, FOLLOW: 2, HOLD: 3, SWEEP: 4 } as const;
 
 export const has = (flags: number, flag: number): boolean => (flags & flag) !== 0;
+
+// Power monitor (host/src/teleop_host/power.py): one hand over the last second.
+export interface PowerWindow {
+  min_median_v: number | null;
+  min_v: number | null;
+  min_v_joint: number; // servo id
+  peak_supply_a: number; // estimated, HLS servos only
+  peak_phase_a: number;
+  now_median_v: number | null;
+  now_supply_a: number;
+  armed: number;
+  samples: number;
+}
+
+export interface TripRecord {
+  wall_time: number; // epoch seconds
+  hand: string;
+  fault: string;
+  joint: number;
+  text: string;
+  hands: Record<string, PowerWindow>;
+}

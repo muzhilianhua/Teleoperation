@@ -31,6 +31,7 @@ uv run teleop-host --sim                          # two simulated hands, no hard
 | Config store | `save`, `load`, `defaults`, `dump`, and backups / diff / restore. Replaces `tools/calib.py`; uses the same `calib/*.txt` files |
 | Encoders | `enc`, `monitor` |
 | Diagnostics | `stats`, `stats reset`, telemetry rate, link counters |
+| Power | Both hands' servo voltage and estimated supply current against the bench supply's limit, and the voltage / current of the second before every fault that switched joints off |
 | Console | Any text command, with history, as on the serial port |
 | Plugins | Reserved pages: Recording (M3), Filter tuning, Parameter tuning (M4), Camera |
 

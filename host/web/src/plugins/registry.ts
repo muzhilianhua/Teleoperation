@@ -20,6 +20,7 @@ export const corePages: PageDef[] = [
   { id: 'config-store', title: 'Config store', group: 'Setup', load: () => import('../pages/ConfigStore.svelte') },
   { id: 'encoders', title: 'Encoders', group: 'Diagnose', load: () => import('../pages/Encoders.svelte') },
   { id: 'diagnostics', title: 'Diagnostics', group: 'Diagnose', load: () => import('../pages/Diagnostics.svelte') },
+  { id: 'power', title: 'Power', group: 'Diagnose', load: () => import('../pages/Power.svelte') },
   { id: 'console', title: 'Console', group: 'Diagnose', load: () => import('../pages/Console.svelte') },
 ];
 

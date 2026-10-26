@@ -13,6 +13,7 @@
     { id: 'grip', title: 'Grip lead', unit: 'steps', channels: ['grip_lead'] },
     { id: 'speed', title: 'Speed command', unit: 'steps/s', channels: ['speed_cmd'] },
     { id: 'temp', title: 'Temperature', unit: '°C', channels: ['temp_c'] },
+    { id: 'supply', title: 'Servo supply', unit: 'V', channels: ['voltage_v'] },
   ] as const;
 
   // Selected joints as "<hand>.<servo id>", e.g. "right.1".
