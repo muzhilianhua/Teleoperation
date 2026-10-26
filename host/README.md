@@ -7,15 +7,16 @@ A local Python service that talks to the ESP32-S3 over the host link ([`../docs/
 ```bash
 cd host
 uv sync
-uv run teleop-host                                # connects to the only ESP32 found and opens http://127.0.0.1:8790
-uv run teleop-host --port /dev/cu.usbmodem11101   # pick the port explicitly
-uv run teleop-host --sim                          # simulated hand, no hardware
+uv run teleop-host                                # connects every ESP32 found (one per hand), opens http://127.0.0.1:8790
+uv run teleop-host --port /dev/cu.usbmodem11101 --port /dev/cu.usbmodem11201
+uv run teleop-host --sim                          # two simulated hands, no hardware
 ```
 
 - **Before you start**: close `pio device monitor`, because only one program can hold the port.
-- **Port choice**: with several boards connected, or none, pick the port in the top bar.
+- **Two hands**: each board reports its hand (GPIO4 strap) when it connects, and the GUI binds it to that hand. Swapping USB ports or cables never swaps hands. A second board claiming an occupied hand is disconnected with a message to check its strap. Boards found later are added from the top bar (**Connect board**).
+- **Which hand a page acts on**: the Right / Left switch in the top bar. The Dashboard also has a *Both hands* view. **E-STOP** (and `Esc`) and **Disarm all** act on both hands; everything else on the selected one.
 - **On connect**: the GUI switches the board to the host link. Disconnecting, or quitting `teleop-host`, returns it to the text console.
-- **If the link drops while joints are armed** (USB unplugged, the GUI crashed): the board switches every servo off within about 1 s.
+- **If the link drops while joints are armed** (USB unplugged, the GUI crashed): that board switches every servo off within about 1 s. The other hand keeps following.
 - **Closing the browser tab does not** do this. The board keeps following as long as `teleop-host` runs.
 
 ## Pages
@@ -86,14 +87,20 @@ Register the plugin in `plugins/__init__.py`. The placeholders in `plugins/place
 ## Bench checklist
 
 1. **Text console unchanged.** Without the GUI, `help`, `status`, `joints` and `dump` print as before; `help` adds one line, `host on`.
-2. **Connect.** The top bar shows `connected` with the firmware build (`git describe`). Every page fills in.
+2. **Connect.**
+   - The top bar shows both hands connected, with the firmware build (`git describe`), and every page fills in.
+   - Swap the two USB cables and restart `teleop-host`: the hands stay the same.
+   - Strap both boards as right: the second one is rejected with a notice.
 3. **Telemetry.** Run for 10 min:
    - Diagnostics shows `dropped telemetry` 0;
    - jitter and overruns are the same with telemetry at 100 Hz as at 10 Hz;
    - Plots show continuous traces.
-4. **E-stop.** E-STOP and `Esc` switch everything off at once; BOOT still works.
-5. **Link loss.** With a joint armed, unplug USB or kill `teleop-host`: torque goes off within 1 s, and the text console prints `[host] link lost, torque off`.
+4. **E-stop.** E-STOP and `Esc` switch both hands off at once; BOOT stops its own hand.
+5. **Link loss.** With both hands armed, unplug one board's USB: that hand's torque goes off within 1 s, and its text console prints `[host] link lost, torque off`. The other hand keeps following.
 6. **Reconnect.** Restart `teleop-host`: it takes the board over again, even within the 1 s heartbeat window.
 7. **Calibration.** Calibrate one joint end to end in the Calibration page, arm it on the Dashboard, and watch it in Plots.
-8. **Backups.** Back up, change a setting, Diff (one change), Restore, Diff (no changes).
+8. **Backups.**
+   - Back up, change a setting, Diff (one change), Restore, Diff (no changes).
+   - Import a left-hand dump into the right hand's store and try to restore it: refused.
+   - Backups are stored in `calib/right/` and `calib/left/`.
 9. **Refusals.** While armed, Save / Load / Ping are refused with a toast. Live parameters (vmax, ilimit, …) still apply.

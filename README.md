@@ -22,13 +22,25 @@ Design document: <https://claude.ai/artifact/81sxWeamYJnzXBLv281o2v>
 | Function | Connection |
 |---|---|
 | MCU | ESP32-S3-WROOM-2-N32R16V DevKit |
-| Encoders | AS5048B × 9 on one I2C bus: SDA GPIO8, SCL GPIO9, 400 kHz. Addresses `0x40 0x44 … 0x60` (encoder #0–#8) burned into OTP |
+| Encoders | AS5048B × 9 on one I2C bus: SDA GPIO8, SCL GPIO9, 400 kHz. Right glove `0x08 0x0C … 0x28`, left glove `0x40 0x44 … 0x60` (encoder #0–#8) |
 | Servo bus | IDs 1–9, mixed models (see *Joints*), via the FE-URT-2 TTL port at 1 Mbps: GPIO17 (TX) → URT-2 RX, GPIO18 (RX) ← URT-2 TX, common GND |
 | Servo power | ~6 V. The supervisor switches the hand off outside 5.5–6.5 V. **Use a supply with ample current before full-hand or grasp tests**: servo_bringup recorded 6 V sag tripping every servo at once |
-| E-stop | DevKit BOOT button (GPIO0) |
+| E-stop | DevKit BOOT button (GPIO0); the GUI's E-STOP stops both hands |
+| Hand strap | GPIO4: open = right hand, tied to GND = left hand (read once at boot) |
 | Console | Native USB port (`USB` connector), 115200 |
 
 > Only one master may drive the servo bus. Close the servo_bringup tools while the ESP32 is connected.
+
+## Two hands
+
+Each hand has its own board, glove, servo bus and supply, running the same firmware. The GPIO4 strap selects the hand at boot (`[boot] hand: left (GPIO4 to GND)`), and with it:
+
+- the joint table and encoder addresses (`kRightJoints` / `kLeftJoints`, `kRightEncoderAddresses` / `kLeftEncoderAddresses` in `include/config.h`);
+- the NVS key: the right hand keeps `cfg`, so calibrations stored before the second hand stay valid; the left hand uses `cfg_l`.
+
+Both hands have the same servo ids and models. The left table's travel is 0/0 until measured on the bench, with the same procedure as the right hand (*Bring-up of the rebuilt hand*). Mirroring needs no setting: calibrating A ↔ A and B ↔ B gives each joint its direction.
+
+The two hands are independent: a fault, disarm or reset of one never touches the other. Only E-stop from the GUI reaches both. `dump` starts with `# hand right|left`, and backup restore refuses the other hand's dump.
 
 ## PC GUI (`host/`)
 
