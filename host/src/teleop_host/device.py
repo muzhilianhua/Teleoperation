@@ -16,7 +16,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from .config_files import Change, commands_of, diff, extract_dump, joint_names
+from .config_files import Change, commands_of, diff, extract_dump, hand_of_dump, joint_names
 from .link.link import LinkError, LinkManager, LinkState, LinkStatus
 from .link.transport import Transport
 from .protocol.frames import UnframedText
@@ -175,6 +175,10 @@ class Device:
         to what NVS holds.
         """
         current = await self.dump()
+        if not force and hand_of_dump(current) != hand_of_dump(wanted):
+            return RestoreResult(
+                False, f"the backup is the {hand_of_dump(wanted)} hand's, this is the {hand_of_dump(current)} hand"
+            )
         if not force and joint_names(current) != joint_names(wanted):
             return RestoreResult(False, "the backup was made for another joint table (ids / names in config.h)")
         for line in commands_of(wanted):

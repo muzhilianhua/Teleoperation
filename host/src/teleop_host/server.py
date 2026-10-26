@@ -1,23 +1,27 @@
-"""FastAPI app: REST for connection and backups, one WebSocket per browser tab.
+"""FastAPI app for both hands: REST for connections and backups, one WebSocket per browser tab.
+
+Every device message carries the hand it came from ("right" / "left"; null
+for a board whose HELLO has not arrived yet).
 
 WebSocket messages (JSON, `type` field):
 
 server -> browser
-  snapshot   on connect: link status, device info, latest slow status, recent events and log lines
-  link       link status changed
-  info       HELLO (device info, joint table)
-  tel        latest telemetry, at most TEL_HZ
-  slow       latest slow status, at most SLOW_HZ
-  plot       {t_us: [...], series: {"j2.exo_deg": [...]}}: every sample of the subscribed channels
-  event      one device event
-  log        one printed / unframed line
+  snapshot   on connect: per hand link, info, latest tel / slow, recent events and logs; plugins
+  link       {hand, port, data}: link status changed
+  info       {hand, data}: HELLO (device info, joint table)
+  tel        {hand, data}: latest telemetry, at most TEL_HZ per hand
+  slow       {hand, data}: latest slow status, at most SLOW_HZ per hand
+  plot       {t_us: {hand: [...]}, series: {"right.j2.exo_deg": [...]}}: every sample of subscribed channels
+  event      {hand, data}: one device event
+  log        {hand, data}: one printed / unframed line
+  notice     {data: {text}}: pairing problems (two boards on one hand)
   cmd_result reply to a `cmd`
 
 browser -> server
-  cmd             {id, text}: one console command
-  estop           E-stop now (priority frame)
-  plot_subscribe  {keys: ["j2.exo_deg", ...]}
-  telemetry_rate  {telemetry_divider, slow_divider}
+  cmd             {id, hand, text}: one console command on that hand
+  estop           E-stop on every hand (priority frame)
+  plot_subscribe  {keys: ["right.j2.exo_deg", ...]}
+  telemetry_rate  {telemetry_divider, slow_divider}: both hands
 """
 
 from __future__ import annotations
@@ -36,9 +40,10 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config_files import BackupStore, extract_dump
+from .config_files import Backup, BackupStore, HandBackups, extract_dump
 from .device import CommandResult, Device
-from .link.discovery import find_esp32, list_serial_ports
+from .hands import HANDS, HandManager, HandNotice
+from .link.discovery import list_serial_ports
 from .link.link import LinkStatus
 from .link.serial_transport import SerialTransport
 from .link.transport import Transport
@@ -50,7 +55,6 @@ TEL_HZ = 30.0
 SLOW_HZ = 5.0
 PLOT_FLUSH_S = 0.05
 HISTORY_ON_CONNECT = 300
-SIM_PORT = "sim"
 
 # Plot channels per joint: name -> value from (joint record, deg per encoder count).
 PLOT_CHANNELS: dict[str, Callable[[TelemetryJoint, float], float]] = {
@@ -92,12 +96,20 @@ def result_json(r: CommandResult) -> dict[str, Any]:
     }
 
 
+def link_json(s: LinkStatus) -> dict[str, str]:
+    return {"state": s.state.value, "port": s.port, "detail": s.detail, "firmware": s.firmware}
+
+
+def backup_json(b: Backup) -> dict[str, Any]:
+    return {"name": b.name, "saved": b.saved, "tag": b.tag, "note": b.note, "hand": b.hand}
+
+
 class Client:
     def __init__(self, ws: WebSocket) -> None:
         self.ws = ws
-        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=2000)
-        self.plot_keys: list[tuple[int, str, str]] = []  # (joint index, channel, key)
-        self.plot_t: list[int] = []
+        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=4000)
+        self.plot_keys: dict[str, list[tuple[int, str, str]]] = {}  # hand -> (joint index, channel, key)
+        self.plot_t: dict[str, list[int]] = {}
         self.plot_series: dict[str, list[float]] = {}
 
     def push(self, message: dict[str, Any]) -> None:
@@ -106,18 +118,18 @@ class Client:
 
 
 class Hub:
-    """Fans device messages out to every connected browser."""
+    """Fans both hands' messages out to every connected browser."""
 
-    def __init__(self, device: Device, plugins: list[Plugin]) -> None:
-        self.device = device
+    def __init__(self, hands: HandManager, plugins: list[Plugin]) -> None:
+        self.hands = hands
         self.plugins = plugins
         self.clients: set[Client] = set()
-        self._last_tel = 0.0
-        self._last_slow = 0.0
+        self._last_tel: dict[str, float] = {}
+        self._last_slow: dict[str, float] = {}
         self._tasks: list[asyncio.Task[None]] = []
 
     def start(self) -> None:
-        self.device.subscribe(self.on_message)
+        self.hands.subscribe(self.on_message)
         self._tasks.append(asyncio.create_task(self._flush_plots()))
 
     async def stop(self) -> None:
@@ -131,42 +143,47 @@ class Hub:
         for client in self.clients:
             client.push(message)
 
-    def on_message(self, m: Any) -> None:
+    def on_message(self, hand: str | None, m: Any) -> None:
         for plugin in self.plugins:
             with contextlib.suppress(Exception):
-                plugin.on_message(m)
-        loop_time = asyncio.get_running_loop().time()
+                plugin.on_message(hand, m)
+        now = asyncio.get_running_loop().time()
+        key = hand or "?"
         match m:
             case Telemetry():
-                self._collect_plot(m)
-                if loop_time - self._last_tel >= 1 / TEL_HZ:
-                    self._last_tel = loop_time
-                    self.broadcast({"type": "tel", "data": to_json(m)})
+                if hand:
+                    self._collect_plot(hand, m)
+                if now - self._last_tel.get(key, 0.0) >= 1 / TEL_HZ:
+                    self._last_tel[key] = now
+                    self.broadcast({"type": "tel", "hand": hand, "data": to_json(m)})
             case SlowStatus():
-                if loop_time - self._last_slow >= 1 / SLOW_HZ:
-                    self._last_slow = loop_time
-                    self.broadcast({"type": "slow", "data": to_json(m)})
+                if now - self._last_slow.get(key, 0.0) >= 1 / SLOW_HZ:
+                    self._last_slow[key] = now
+                    self.broadcast({"type": "slow", "hand": hand, "data": to_json(m)})
             case DeviceInfo():
-                self.broadcast({"type": "info", "data": to_json(m)})
+                self.broadcast({"type": "info", "hand": hand, "data": to_json(m)})
             case Event():
-                self.broadcast({"type": "event", "data": to_json(m)})
+                self.broadcast({"type": "event", "hand": hand, "data": to_json(m)})
             case Log():
-                self.broadcast({"type": "log", "data": {"source": m.source, "text": m.text}})
+                self.broadcast({"type": "log", "hand": hand, "data": {"source": m.source, "text": m.text}})
             case UnframedText():
                 for line in m.text.replace("\x00", "").splitlines():
                     if line.strip():
-                        self.broadcast({"type": "log", "data": {"source": -1, "text": line}})
+                        self.broadcast({"type": "log", "hand": hand, "data": {"source": -1, "text": line}})
             case LinkStatus():
-                self.broadcast({"type": "link", "data": link_json(m)})
+                self.broadcast({"type": "link", "hand": hand, "port": m.port, "data": link_json(m)})
+            case HandNotice():
+                self.broadcast({"type": "notice", "data": {"text": m.text}})
 
-    def _collect_plot(self, t: Telemetry) -> None:
-        info = self.device.info
-        k = info.degrees_per_count if info else 360 / 16384
+    def _collect_plot(self, hand: str, t: Telemetry) -> None:
+        device = self.hands.device(hand)
+        k = device.info.degrees_per_count if device and device.info else 360 / 16384
         for client in self.clients:
-            if not client.plot_keys:
+            keys = client.plot_keys.get(hand)
+            if not keys:
                 continue
-            client.plot_t.append(t.t_us)
-            for index, channel, key in client.plot_keys:
+            client.plot_t.setdefault(hand, []).append(t.t_us)
+            for index, channel, key in keys:
                 if index < len(t.joints):
                     client.plot_series.setdefault(key, []).append(PLOT_CHANNELS[channel](t.joints[index], k))
 
@@ -176,24 +193,44 @@ class Hub:
             for client in self.clients:
                 if client.plot_t:
                     client.push({"type": "plot", "data": {"t_us": client.plot_t, "series": client.plot_series}})
-                    client.plot_t, client.plot_series = [], {}
+                    client.plot_t, client.plot_series = {}, {}
 
     def subscribe_plot(self, client: Client, keys: list[str]) -> None:
-        info = self.device.info
-        ids = [j.servo_id for j in info.joints] if info else []
-        parsed = []
-        for key in keys[:64]:
-            joint, _, channel = key.partition(".")
-            if channel in PLOT_CHANNELS and joint.startswith("j") and joint[1:].isdigit() and int(joint[1:]) in ids:
-                parsed.append((ids.index(int(joint[1:])), channel, key))
-        client.plot_keys, client.plot_t, client.plot_series = parsed, [], {}
+        parsed: dict[str, list[tuple[int, str, str]]] = {}
+        for key in keys[:128]:
+            hand, _, rest = key.partition(".")
+            joint, _, channel = rest.partition(".")
+            device = self.hands.device(hand)
+            info = device.info if device else None
+            if info is None or channel not in PLOT_CHANNELS or not joint.startswith("j") or not joint[1:].isdigit():
+                continue
+            ids = [j.servo_id for j in info.joints]
+            if int(joint[1:]) in ids:
+                parsed.setdefault(hand, []).append((ids.index(int(joint[1:])), channel, key))
+        client.plot_keys, client.plot_t, client.plot_series = parsed, {}, {}
 
 
-def link_json(s: LinkStatus) -> dict[str, str]:
-    return {"state": s.state.value, "port": s.port, "detail": s.detail, "firmware": s.firmware}
+def hand_state(hands: HandManager, hand: str) -> dict[str, Any]:
+    device = hands.device(hand)
+    if device is None:
+        return {"link": None, "port": "", "info": None, "slow": None, "tel": None, "events": [], "logs": []}
+    return {
+        "link": link_json(device.status),
+        "port": hands.port_of(hand),
+        "info": to_json(device.info),
+        "slow": to_json(device.slow),
+        "tel": to_json(device.telemetry),
+        "events": to_json(list(device.events)[-HISTORY_ON_CONNECT:]),
+        "logs": list(device.logs)[-HISTORY_ON_CONNECT:],
+    }
 
 
 class ConnectRequest(BaseModel):
+    port: str
+
+
+class DisconnectRequest(BaseModel):
+    hand: str | None = None
     port: str | None = None
 
 
@@ -218,32 +255,38 @@ class RestoreRequest(BaseModel):
 
 
 def create_app(
-    device: Device,
-    store: BackupStore,
+    hands: HandManager,
+    backups: HandBackups,
     plugins: list[Plugin],
     *,
     static_dir: Path | None = None,
-    sim_factory: Callable[[], Transport] | None = None,
-    initial_port: str | None = None,
+    sim_factories: dict[str, Callable[[], Transport]] | None = None,
+    initial_ports: list[str] | None = None,
 ) -> FastAPI:
-    hub = Hub(device, plugins)
+    hub = Hub(hands, plugins)
+    sims = sim_factories or {}
 
     def factory_for(port: str) -> Callable[[], Transport]:
-        if port == SIM_PORT:
-            if sim_factory is None:
-                raise HTTPException(400, "simulator not enabled (start with --sim)")
-            return sim_factory
+        if port in sims:
+            return sims[port]
         return lambda: SerialTransport(port)
+
+    def connect_port(port: str) -> None:
+        try:
+            hands.connect(factory_for(port), port)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         hub.start()
         for plugin in plugins:
-            await plugin.start(device)
-        if initial_port:
-            device.connect(factory_for(initial_port), initial_port)
+            await plugin.start(hands)
+        for port in initial_ports or []:
+            with contextlib.suppress(HTTPException):
+                connect_port(port)
         yield
-        device.disconnect()
+        hands.disconnect_all()
         for plugin in plugins:
             await plugin.stop()
         await hub.stop()
@@ -251,88 +294,119 @@ def create_app(
     app = FastAPI(title="teleop-host", lifespan=lifespan)
     api = APIRouter(prefix="/api")
 
+    def require_hand(hand: str) -> str:
+        if hand not in HANDS:
+            raise HTTPException(404, f"no hand {hand!r}: use right or left")
+        return hand
+
+    def device_of(hand: str) -> Device:
+        device = hands.device(require_hand(hand))
+        if device is None:
+            raise HTTPException(409, f"{hand} hand not connected")
+        return device
+
+    def store_of(hand: str) -> BackupStore:
+        return backups.for_hand(require_hand(hand))
+
+    # ---- connections ----------------------------------------------------------------
+
     @api.get("/ports")
     def ports() -> dict[str, Any]:
-        found = [dataclasses.asdict(p) for p in list_serial_ports()]
-        if sim_factory is not None:
-            found.insert(0, {"device": SIM_PORT, "description": "Simulated device", "is_esp32": True})
-        return {"ports": found, "suggested": SIM_PORT if sim_factory and not find_esp32() else find_esp32()}
+        found = [{"device": name, "description": "Simulated hand", "is_esp32": True} for name in sims]
+        found += [dataclasses.asdict(p) for p in list_serial_ports()]
+        return {"ports": found, "in_use": sorted(hands.ports_in_use())}
 
     @api.post("/connect")
-    async def connect(req: ConnectRequest) -> dict[str, Any]:
-        port = req.port or find_esp32()
-        if not port:
-            raise HTTPException(400, "no ESP32 found: pick a port")
-        device.connect(factory_for(port), port)
-        return link_json(device.status)
+    def connect(req: ConnectRequest) -> dict[str, Any]:
+        connect_port(req.port)
+        return {"port": req.port}
 
     @api.post("/disconnect")
-    def disconnect() -> dict[str, Any]:
-        device.disconnect()
-        return link_json(device.status)
+    def disconnect(req: DisconnectRequest) -> dict[str, Any]:
+        if req.hand:
+            hands.disconnect(require_hand(req.hand))
+        elif req.port:
+            hands.disconnect_port(req.port)
+        else:
+            hands.disconnect_all()
+        return {"ok": True}
 
-    @api.get("/info")
-    def info() -> dict[str, Any]:
-        return {"link": link_json(device.status), "info": to_json(device.info)}
-
-    @api.post("/command")
-    async def command(req: CommandRequest) -> dict[str, Any]:
-        return result_json(await device.command(req.text))
+    @api.get("/hands")
+    def hand_list() -> dict[str, Any]:
+        out = {}
+        for hand in HANDS:
+            device = hands.device(hand)
+            out[hand] = {
+                "link": link_json(device.status) if device else None,
+                "port": hands.port_of(hand),
+                "board_id": device.info.board_id if device and device.info else "",
+            }
+        return out
 
     @api.post("/estop")
-    async def estop() -> dict[str, bool]:
-        return {"sent": await device.estop()}
+    async def estop() -> dict[str, list[str]]:
+        return {"reached": await hands.estop_all()}
 
-    @api.get("/backups")
-    def backups() -> list[dict[str, Any]]:
-        return [{"name": b.name, "saved": b.saved, "tag": b.tag, "note": b.note} for b in store.list()]
+    # ---- per hand ---------------------------------------------------------------------
 
-    def load_backup(name: str):
+    @api.get("/{hand}/info")
+    def info(hand: str) -> dict[str, Any]:
+        device = device_of(hand)
+        return {"link": link_json(device.status), "info": to_json(device.info)}
+
+    @api.post("/{hand}/command")
+    async def command(hand: str, req: CommandRequest) -> dict[str, Any]:
+        return result_json(await device_of(hand).command(req.text))
+
+    @api.get("/{hand}/backups")
+    def backup_list(hand: str) -> list[dict[str, Any]]:
+        return [backup_json(b) for b in store_of(hand).list()]
+
+    def load_backup(hand: str, name: str) -> Backup:
         try:
-            return store.get(name)
+            return store_of(hand).get(name)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(404, str(exc)) from exc
 
-    @api.get("/backups/{name}")
-    def backup(name: str) -> dict[str, Any]:
-        b = load_backup(name)
-        return {"name": b.name, "saved": b.saved, "tag": b.tag, "note": b.note, "dump": b.dump}
+    @api.get("/{hand}/backups/{name}")
+    def backup(hand: str, name: str) -> dict[str, Any]:
+        b = load_backup(hand, name)
+        return backup_json(b) | {"dump": b.dump}
 
-    @api.get("/backups/{name}/download", response_class=PlainTextResponse)
-    def download(name: str) -> str:
-        return load_backup(name).path.read_text()
+    @api.get("/{hand}/backups/{name}/download", response_class=PlainTextResponse)
+    def download(hand: str, name: str) -> str:
+        return load_backup(hand, name).path.read_text()
 
-    @api.post("/backups")
-    async def save_backup(req: BackupRequest) -> dict[str, Any]:
+    @api.post("/{hand}/backups")
+    async def save_backup(hand: str, req: BackupRequest) -> dict[str, Any]:
+        device = device_of(hand)
         try:
             dump = await device.dump()
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
-        b = store.save(dump, req.tag, req.note, device.status.port)
-        return {"name": b.name, "saved": b.saved, "tag": b.tag, "note": b.note}
+        return backup_json(store_of(hand).save(dump, req.tag, req.note, hands.port_of(hand)))
 
-    @api.post("/backups/import")
-    def import_backup(req: ImportRequest) -> dict[str, Any]:
+    @api.post("/{hand}/backups/import")
+    def import_backup(hand: str, req: ImportRequest) -> dict[str, Any]:
         dump = extract_dump(req.text.splitlines())
         if dump is None:
             raise HTTPException(400, "no complete dump (`defaults` ... `# end of dump`) in the text")
-        b = store.save(dump, req.tag, req.note, "pasted text")
-        return {"name": b.name, "saved": b.saved, "tag": b.tag, "note": b.note}
+        return backup_json(store_of(hand).save(dump, req.tag, req.note, "pasted text"))
 
-    @api.post("/backups/{name}/diff")
-    async def diff(name: str) -> dict[str, Any]:
-        b = load_backup(name)
+    @api.post("/{hand}/backups/{name}/diff")
+    async def diff(hand: str, name: str) -> dict[str, Any]:
+        b = load_backup(hand, name)
         try:
-            changes = await device.diff(b.dump)
+            changes = await device_of(hand).diff(b.dump)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"changes": to_json(changes)}
 
-    @api.post("/backups/{name}/restore")
-    async def restore(name: str, req: RestoreRequest) -> dict[str, Any]:
-        b = load_backup(name)
+    @api.post("/{hand}/backups/{name}/restore")
+    async def restore(hand: str, name: str, req: RestoreRequest) -> dict[str, Any]:
+        b = load_backup(hand, name)
         try:
-            result = await device.restore(b.dump, save=req.save, force=req.force)
+            result = await device_of(hand).restore(b.dump, save=req.save, force=req.force)
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"ok": result.ok, "message": result.message, "mismatch": to_json(result.mismatch)}
@@ -341,10 +415,13 @@ def create_app(
     def plugin_list() -> list[dict[str, str]]:
         return [p.describe() for p in plugins]
 
-    app.include_router(api)
+    # Plugin routes first: /api/plugins/... must not be taken for a hand.
     for plugin in plugins:
         if (router := plugin.router()) is not None:
             app.include_router(router, prefix=f"/api/plugins/{plugin.id}")
+    app.include_router(api)
+
+    # ---- WebSocket ------------------------------------------------------------------
 
     @app.websocket("/ws")
     async def websocket(ws: WebSocket) -> None:
@@ -354,22 +431,13 @@ def create_app(
         client.push(
             {
                 "type": "snapshot",
-                "data": {
-                    "link": link_json(device.status),
-                    "info": to_json(device.info),
-                    "slow": to_json(device.slow),
-                    "tel": to_json(device.telemetry),
-                    "events": to_json(list(device.events)[-HISTORY_ON_CONNECT:]),
-                    "logs": list(device.logs)[-HISTORY_ON_CONNECT:],
-                    "plugins": [p.describe() for p in plugins],
-                },
+                "data": {"hands": {h: hand_state(hands, h) for h in HANDS}, "plugins": [p.describe() for p in plugins]},
             }
         )
         sender = asyncio.create_task(_send_loop(ws, client))
         try:
             while True:
-                message = await ws.receive_json()
-                await _handle_browser(message, client)
+                await _handle_browser(await ws.receive_json(), client)
         except WebSocketDisconnect:
             pass
         finally:
@@ -379,18 +447,24 @@ def create_app(
     async def _handle_browser(message: dict[str, Any], client: Client) -> None:
         kind = message.get("type")
         if kind == "estop":
-            await device.estop()
+            await hands.estop_all()
         elif kind == "cmd":
 
             async def run() -> None:
-                result = await device.command(str(message.get("text", "")))
+                device = hands.device(str(message.get("hand")))
+                if device is None:
+                    result = CommandResult(str(message.get("text", "")), status="not_connected")
+                    result.error = f"{message.get('hand')} hand not connected"
+                else:
+                    result = await device.command(str(message.get("text", "")))
                 client.push({"type": "cmd_result", "id": message.get("id"), "data": result_json(result)})
 
             asyncio.create_task(run())  # commands may take seconds; keep reading (E-stop!)
         elif kind == "plot_subscribe":
             hub.subscribe_plot(client, [str(k) for k in message.get("keys", [])])
         elif kind == "telemetry_rate":
-            device.set_telemetry(int(message.get("telemetry_divider", 1)), int(message.get("slow_divider", 10)))
+            for device in hands.devices.values():
+                device.set_telemetry(int(message.get("telemetry_divider", 1)), int(message.get("slow_divider", 10)))
 
     if static_dir is not None and (static_dir / "index.html").is_file():
         app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")

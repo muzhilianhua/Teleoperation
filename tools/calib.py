@@ -13,7 +13,8 @@ USB console so calibrations can live in files (and in git):
     uv run tools/calib.py restore calib/20261021-143005_woody.txt
     uv run tools/calib.py ports
 
-``restore`` refuses a file made for a different joint table (ids or names in
+``restore`` refuses a file made for the other hand (the ``# hand`` line of the
+dump; none = right) or for a different joint table (ids or names in
 ``config.h`` changed, e.g. the rebuilt hand) unless ``--force``. It shows what
 will change, asks before applying, then applies the commands, dumps again to
 verify, and only then runs ``save``. If anything is rejected it sends
@@ -115,6 +116,11 @@ def settings_of(dump: list[str]) -> dict[tuple[str, str], str]:
         elif len(tokens) >= 3:
             settings[("global", tokens[1])] = " ".join(tokens[2:])
     return settings
+
+
+def hand_of(dump: list[str]) -> str:
+    """The ``# hand <name>`` line; dumps from before two-hand firmware are the right hand's."""
+    return next((line.split()[2] for line in dump if line.startswith("# hand ")), "right")
 
 
 def joint_names(dump: list[str]) -> dict[str, str]:
@@ -220,6 +226,8 @@ def cmd_diff(args: argparse.Namespace) -> None:
         current = read_dump(console)
     finally:
         console.close()
+    if hand_of(current) != hand_of(wanted):
+        print(f"different hands: the device is the {hand_of(current)} hand, the file the {hand_of(wanted)} hand's")
     if joint_names(current) != joint_names(wanted):
         print("joint table differs (ids / names in config.h):")
         print(f"  device {joint_names(current)}\n  file   {joint_names(wanted)}")
@@ -233,6 +241,11 @@ def cmd_restore(args: argparse.Namespace) -> None:
     console = connect(args)
     try:
         current = read_dump(console)
+        if hand_of(current) != hand_of(wanted) and not args.force:
+            sys.exit(
+                f"refused: the device is the {hand_of(current)} hand, the file is the {hand_of(wanted)} hand's\n"
+                "use --force only if you really mean to copy one hand's settings to the other"
+            )
         if joint_names(current) != joint_names(wanted) and not args.force:
             sys.exit(
                 "refused: the file was made for another joint table (ids / names in config.h)\n"

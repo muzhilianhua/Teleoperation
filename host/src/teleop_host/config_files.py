@@ -51,6 +51,14 @@ def settings_of(dump: list[str]) -> dict[tuple[str, str], str]:
     return settings
 
 
+def hand_of_dump(dump: list[str]) -> str:
+    """The `# hand <name>` line; dumps from before two-hand firmware are the right hand's."""
+    for line in dump:
+        if line.startswith("# hand "):
+            return line.split()[2]
+    return "right"
+
+
 def joint_names(dump: list[str]) -> dict[str, str]:
     names: dict[str, str] = {}
     for line in dump:
@@ -90,19 +98,26 @@ class Backup:
     note: str
     dump: list[str]
 
+    @property
+    def hand(self) -> str:
+        return hand_of_dump(self.dump)
+
 
 class BackupStore:
-    def __init__(self, directory: Path = DEFAULT_DIR) -> None:
+    """Backups of one hand. `legacy` is a read-only directory also listed (older flat backups)."""
+
+    def __init__(self, directory: Path = DEFAULT_DIR, legacy: Path | None = None) -> None:
         self.directory = directory
+        self.legacy = legacy
 
     def list(self) -> list[Backup]:
-        if not self.directory.is_dir():
-            return []
-        backups = [b for p in sorted(self.directory.glob("*.txt"), reverse=True) if (b := self._read(p)) is not None]
-        return backups
+        paths = [p for d in (self.directory, self.legacy) if d is not None and d.is_dir() for p in d.glob("*.txt")]
+        return [b for p in sorted(paths, key=lambda p: p.name, reverse=True) if (b := self._read(p)) is not None]
 
     def get(self, name: str) -> Backup:
         path = self._path(name)
+        if not path.is_file() and self.legacy is not None:
+            path = self.legacy / path.name
         backup = self._read(path)
         if backup is None:
             raise FileNotFoundError(f"{name}: not a backup with a complete dump")
@@ -144,3 +159,13 @@ class BackupStore:
                 if line.startswith(prefix) and not meta[key]:
                     meta[key] = line[len(prefix) :]
         return Backup(path.name, path, meta["saved"], meta["tag"], meta["note"], dump)
+
+
+class HandBackups:
+    """calib/<hand>/*.txt; flat calib/*.txt from before the second hand count as the right hand's."""
+
+    def __init__(self, root: Path = DEFAULT_DIR) -> None:
+        self.root = root
+
+    def for_hand(self, hand: str) -> BackupStore:
+        return BackupStore(self.root / hand, legacy=self.root if hand == "right" else None)
