@@ -26,6 +26,11 @@ def list_serial_ports() -> list[PortInfo]:
     return sorted(ports, key=lambda p: (not p.is_esp32, p.device))
 
 
+def find_esp32s() -> list[str]:
+    """Every ESP32 port (one per hand board)."""
+    return [p.device for p in list_serial_ports() if p.is_esp32]
+
+
 def find_esp32() -> str | None:
     """The ESP32 port if exactly one is connected; never guesses between several."""
     candidates = [p.device for p in list_serial_ports() if p.is_esp32]
