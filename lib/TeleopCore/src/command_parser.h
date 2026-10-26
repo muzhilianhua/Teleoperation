@@ -94,7 +94,9 @@ const char* applySetting(const ParsedCommand& command, JointSettings* joints,
 
 // Writes the whole configuration as console commands, starting with
 // `defaults`. Returns the text length, or 0 if capacity was too small.
+// handName (e.g. "right") adds a `# hand <name>` comment line after
+// `defaults`, which backup tools check before restoring onto another hand.
 size_t formatDump(const JointSettings* joints, const JointDefaults* defaults, uint8_t count,
-                  const GlobalSettings& global, char* out, size_t capacity);
+                  const GlobalSettings& global, char* out, size_t capacity, const char* handName = nullptr);
 
 }  // namespace teleop

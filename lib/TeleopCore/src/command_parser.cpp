@@ -429,9 +429,10 @@ const char* applySetting(const ParsedCommand& c, JointSettings* joints, const Jo
 }
 
 size_t formatDump(const JointSettings* joints, const JointDefaults* defaults, uint8_t count,
-                  const GlobalSettings& global, char* out, size_t capacity) {
+                  const GlobalSettings& global, char* out, size_t capacity, const char* handName) {
   Appender a(out, capacity);
   a.add("defaults\n");
+  if (handName != nullptr) a.add("# hand %s\n", handName);
   for (uint8_t i = 0; i < count; ++i) {
     const JointSettings& s = joints[i];
     const JointDefaults& d = defaults[i];

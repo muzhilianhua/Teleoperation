@@ -59,7 +59,7 @@ void Console::drainMessages() {
 
 void Console::run() {
   out_.println();
-  out_.println("Teleoperation M2 ready. Type `help`.");
+  out_.printf("Teleoperation M2 ready, %s hand. Type `help`.\n", hand::name());
   for (;;) {
     if (hostMode_) {
       hostStep();
@@ -441,6 +441,7 @@ void Console::printStatus() {
 
 void Console::printJoints() {
   controller_.snapshot(snapshot_);
+  out_.printf("%s hand\n", hand::name());
   out_.println(
       "id name           model on enc  exo span   servo A..B   travel     vmax  amax  vsat trk  ilimit/trip "
       "ready home  state  last fault");
@@ -558,7 +559,7 @@ bool Console::formatDumpText() {
   teleop::JointSettings joints[teleop::kMaxJoints];
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) joints[i] = snapshot_.joints[i].settings;
   return teleop::formatDump(joints, hand::joints(), teleop::kMaxJoints, snapshot_.global, dumpBuffer,
-                            sizeof(dumpBuffer)) > 0;
+                            sizeof(dumpBuffer), hand::name()) > 0;
 }
 
 void Console::printMonitorRow() {

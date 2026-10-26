@@ -540,8 +540,9 @@ void test_dump_round_trip() {
   joints[2].exoB = 20000;  // 1.2 encoder turns: only exospan can carry it
   joints[1].currentLimitMa = 650;  // HLS joint
   char text[3072];
-  const size_t n = formatDump(joints, kDefaults, kMaxJoints, g, text, sizeof(text));
+  const size_t n = formatDump(joints, kDefaults, kMaxJoints, g, text, sizeof(text), "left");
   TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_EQUAL(0, strncmp(text, "defaults\n# hand left\n# 1 ", 23));
 
   // Start from a differently configured table to prove `defaults` + sets restore it.
   JointSettings restored[kMaxJoints];
