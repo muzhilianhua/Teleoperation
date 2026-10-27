@@ -89,15 +89,15 @@ inline constexpr teleop::JointDefaults kRightJoints[teleop::kMaxJoints] = {
 // Left hand: travel 0/0 (monitor only) and no encoder until measured on the bench.
 inline constexpr teleop::JointDefaults kLeftJoints[teleop::kMaxJoints] = {
     // id  name   model min max  vmax  vsat  amax   encoder            enabled
-    {1, "thumb_far",  kScs,  0,  0,   400,  50,   8000,  teleop::kNoEncoder, false},
-    {2, "thumb_near",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
-    {3, "thumb_palm",  kScs,  0,  0,   400,  50,   8000,  teleop::kNoEncoder, false},
-    {4, "thumb_abduction",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
-    {5, "index_far",  kScs,  0,  0,   400,  50,   8000,  teleop::kNoEncoder, false},
-    {6, "index_near",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
-    {7, "index_abduction",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
-    {8, "triple_near",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
-    {9, "triple_far",  kHls,  0,  0,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {1, "thumb_far",  kScs,  255,  700,   400,  50,   8000,  teleop::kNoEncoder, false},
+    {2, "thumb_near",  kHls,  770,  1900,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {3, "thumb_palm",  kScs,  100,  685,   400,  50,   8000,  teleop::kNoEncoder, false},
+    {4, "thumb_abduction",  kHls,  1745,  3235,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {5, "index_far",  kScs,  685,  965,   400,  50,   8000,  teleop::kNoEncoder, false},
+    {6, "index_near",  kHls,  1754,  2840,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {7, "index_abduction",  kHls,  2860,  3650,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {8, "triple_near",  kHls,  2610,  3430,   1333, 167,  26666, teleop::kNoEncoder, false},
+    {9, "triple_far",  kHls,  2560,  3010,   1333, 167,  26666, teleop::kNoEncoder, false},
 };
 
 // ---- Global defaults (runtime-adjustable with `set`, stored in NVS) -------

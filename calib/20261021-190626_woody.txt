@@ -1,0 +1,108 @@
+# Teleoperation calibration backup
+# saved 2026-10-21 19:06:26 from /dev/cu.usbmodem11101
+# tag: woody
+# restore: uv run tools/calib.py restore <this file> (or paste it, then `save`)
+defaults
+# 1 thumb_far
+set 1 enc 3
+set 1 exospan 3183 -3445
+set 1 servo 390 586
+set 1 vmax 1000
+set 1 amax 8000
+set 1 vsat 901
+set 1 trk 40
+set 1 grip 60
+set 1 on
+# 2 thumb_near
+set 2 enc 2
+set 2 exospan 6886 -3858
+set 2 servo 1249 1899
+set 2 vmax 4156
+set 2 amax 26666
+set 2 vsat 3116
+set 2 trk 133
+set 2 grip 200
+set 2 ilimit 0
+set 2 on
+# 3 thumb_palm
+set 3 enc 1
+set 3 exospan 5809 1764
+set 3 servo 271 93
+set 3 vmax 1000
+set 3 amax 8000
+set 3 vsat 906
+set 3 trk 40
+set 3 grip 60
+set 3 on
+# 4 thumb_abduction
+set 4 enc 0
+set 4 exospan 3747 20891
+set 4 servo 1878 2625
+set 4 vmax 4233
+set 4 amax 26666
+set 4 vsat 3032
+set 4 trk 133
+set 4 grip 200
+set 4 ilimit 0
+set 4 on
+# 5 index_far
+set 5 enc 6
+set 5 exospan 14061 -4727
+set 5 servo 705 967
+set 5 vmax 1000
+set 5 amax 8000
+set 5 vsat 857
+set 5 trk 40
+set 5 grip 60
+set 5 on
+# 6 index_near
+set 6 enc 7
+set 6 exospan 13753 -3548
+set 6 servo 1807 2881
+set 6 vmax 4216
+set 6 amax 26666
+set 6 vsat 2958
+set 6 trk 133
+set 6 grip 200
+set 6 ilimit 0
+set 6 on
+# 7 index_abduction
+set 7 enc 8
+set 7 exospan 14730 1112
+set 7 servo 2930 3151
+set 7 vmax 4234
+set 7 amax 26666
+set 7 vsat 3165
+set 7 trk 133
+set 7 grip 200
+set 7 ilimit 0
+set 7 on
+# 8 triple_near
+set 8 enc 5
+set 8 exospan 3094 3496
+set 8 servo 3409 2644
+set 8 vmax 4031
+set 8 amax 26666
+set 8 vsat 2982
+set 8 trk 133
+set 8 grip 200
+set 8 ilimit 0
+set 8 on
+# 9 triple_far
+set 9 enc 4
+set 9 exospan 6178 4475
+set 9 servo 2981 2144
+set 9 vmax 4002
+set 9 amax 26666
+set 9 vsat 2997
+set 9 trk 133
+set 9 grip 200
+set 9 ilimit 0
+set 9 on
+set lead 0
+set mincut 1
+set beta 0.01
+set jump 25
+set gripload 60
+set loadtrip off
+# end of dump: run `save` to store it
