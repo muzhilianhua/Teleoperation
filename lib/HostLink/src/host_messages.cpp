@@ -203,6 +203,9 @@ size_t encodeSlowStatus(const SlowStatus& s, uint8_t* out, size_t capacity) {
     w.u8(e.magnetOk);
     w.u32(e.errors);
   }
+  w.f32(s.supplyMinV);
+  w.f32(s.supplyMaxV);
+  w.u16(s.supplyMs);
   return finish(w);
 }
 
@@ -272,6 +275,11 @@ bool decodeSlowStatus(const uint8_t* in, size_t length, SlowStatus& s) {
     e.agc = r.u8();
     e.magnetOk = r.u8();
     e.errors = r.u32();
+  }
+  if (r.ok() && r.remaining() > 0) {  // firmware with a configurable supply window
+    s.supplyMinV = r.f32();
+    s.supplyMaxV = r.f32();
+    s.supplyMs = r.u16();
   }
   return r.ok() && r.remaining() == 0;
 }

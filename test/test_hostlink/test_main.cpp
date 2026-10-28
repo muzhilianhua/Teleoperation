@@ -336,6 +336,9 @@ hostlink::SlowStatus sampleSlowStatus() {
   e.agc = 88;
   e.magnetOk = 1;
   e.errors = 3;
+  s.supplyMinV = 5.0f;
+  s.supplyMaxV = 7.0f;
+  s.supplyMs = 400;
   return s;
 }
 
@@ -418,6 +421,14 @@ void test_slow_status_golden_vector_and_round_trip() {
   TEST_ASSERT_EQUAL(494, back.joints[0].effectiveCurrentMa);
   TEST_ASSERT_EQUAL_HEX8(0x40, back.encoders[0].address);
   TEST_ASSERT_EQUAL(3, back.encoders[0].errors);
+  TEST_ASSERT_EQUAL_FLOAT(5.0f, back.supplyMinV);
+  TEST_ASSERT_EQUAL_FLOAT(7.0f, back.supplyMaxV);
+  TEST_ASSERT_EQUAL(400, back.supplyMs);
+  // Firmware without the supply window: decodes, window 0.
+  SlowStatus legacy;
+  TEST_ASSERT_TRUE(decodeSlowStatus(out, n - 10, legacy));
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, legacy.supplyMinV);
+  TEST_ASSERT_FALSE(decodeSlowStatus(out, n - 4, legacy));
 }
 
 void test_full_hand_slow_status_size() {
@@ -426,8 +437,8 @@ void test_full_hand_slow_status_size() {
   s.encoderCount = kMaxEncoders;
   uint8_t out[1024];
   // 114 B fixed (21 global, 32 timing, 29 bus, 12 encoder pass, 16 link, 4 monitor)
-  // + 9 x (2 + 32) monitor positions and joints + 1 + 9 x 11 encoders = 520 B
-  TEST_ASSERT_EQUAL(114 + 9 * 34 + 1 + 9 * 11, encodeSlowStatus(s, out, sizeof(out)));
+  // + 9 x (2 + 32) monitor positions and joints + 1 + 9 x 11 encoders + 10 supply = 530 B
+  TEST_ASSERT_EQUAL(114 + 9 * 34 + 1 + 9 * 11 + 10, encodeSlowStatus(s, out, sizeof(out)));
 }
 
 void test_event_golden_vector_and_round_trip() {

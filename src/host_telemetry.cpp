@@ -159,6 +159,9 @@ void fillSlowStatus(const Snapshot& s, hostlink::SlowStatus& out) {
   out.jumpDeg = g.jumpDeg;
   out.gripLoadPct = g.gripLoadPct;
   out.loadTrip = g.loadTripEnabled ? 1 : 0;
+  out.supplyMinV = g.supplyMinV;
+  out.supplyMaxV = g.supplyMaxV;
+  out.supplyMs = g.supplyMs;
   const TimingStats& t = s.timing;
   out.cycles = t.cycles;
   out.overruns = t.overruns;

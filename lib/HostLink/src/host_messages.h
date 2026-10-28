@@ -221,6 +221,10 @@ struct SlowStatus {
   float jumpDeg = 0.0f;
   float gripLoadPct = 0.0f;
   uint8_t loadTrip = 0;
+  // Supply window (10 B, appended after the encoders; 0 from older firmware)
+  float supplyMinV = 0.0f;
+  float supplyMaxV = 0.0f;
+  uint16_t supplyMs = 0;
   // Loop timing (32 B)
   uint32_t cycles = 0;
   uint32_t overruns = 0;

@@ -489,8 +489,13 @@ class SlowStatus:
     monitor_position: list[int] = field(default_factory=list)
     joints: list[SlowJoint] = field(default_factory=list)
     encoders: list[SlowEncoder] = field(default_factory=list)
+    # Supply window, appended by newer firmware; 0 when the board does not send it.
+    supply_min_v: float = 0.0
+    supply_max_v: float = 0.0
+    supply_ms: int = 0
 
     _HEAD = struct.Struct("<fffffB8I7IB3I4IBH")
+    _SUPPLY = struct.Struct("<ffH")
 
     def encode(self) -> bytes:
         out = self._HEAD.pack(
@@ -550,7 +555,7 @@ class SlowStatus:
         out += bytes([len(self.encoders)])
         for e in self.encoders:
             out += SlowEncoder._S.pack(e.address, e.state, e.valid, e.angle, e.agc, e.magnet_ok, e.errors)
-        return out
+        return out + self._SUPPLY.pack(self.supply_min_v, self.supply_max_v, self.supply_ms)
 
     @classmethod
     def decode(cls, data: bytes) -> SlowStatus:
@@ -560,6 +565,8 @@ class SlowStatus:
         s.monitor_position = list(r.take(struct.Struct(f"<{count}h")))
         s.joints = [SlowJoint(*r.take(SlowJoint._S)) for _ in range(count)]
         s.encoders = [SlowEncoder(*r.take(SlowEncoder._S)) for _ in range(r.u8())]
+        if not r.done():
+            s.supply_min_v, s.supply_max_v, s.supply_ms = r.take(cls._SUPPLY)
         if not r.done():
             raise struct.error("SLOW_STATUS has trailing bytes")
         return s

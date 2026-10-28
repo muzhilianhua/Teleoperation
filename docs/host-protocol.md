@@ -139,7 +139,7 @@ per joint: state u8 | fault u8 | flags u16 | encRaw u16
 
 The control task encodes every cycle into a 16-deep queue without waiting. A slow host loses samples, which sets `handFlags` bit 3; the control loop never slows down.
 
-### SLOW_STATUS (520 B for 9 joints and 9 encoders)
+### SLOW_STATUS (530 B for 9 joints and 9 encoders)
 
 ```
 global:   leadMs f32 | minCutoffHz f32 | beta f32 | jumpDeg f32 | gripLoadPct f32 | loadTrip u8
@@ -156,7 +156,10 @@ joints:   enabled u8 | encoderIndex u8 (0xFF none) | exoRef u16 | exoB i32 | ser
 encoderCount u8, then per encoder:
           address u8 | state u8 (0 online, 1 no magnet, 2 offline) | valid u8 | angle u16
           agc u8 | magnetOk u8 | errors u32                                       (11 B each)
+supply:   minV f32 | maxV f32 | ms u16                                           (10 B)
 ```
+
+The `supply` block (the hand's supply window, `set supplymin|supplymax|supplyms`) is appended at the end: firmware from before it sends 520 B, and a host reads the window as absent (fixed 5.5–6.5 V, 200 ms).
 
 ### EVENT codes
 
