@@ -138,6 +138,21 @@ def test_replay_one_hand_and_estop(client: TestClient, boards) -> None:
     assert status["state"] == "stopped" and "left" in status["message"]
 
 
+def test_one_hand_dropping_out_leaves_the_other_playing(client: TestClient, boards) -> None:
+    rid = ramp_recording(store_of(client), client, boards, rise=100, seconds=2.0)
+    assert client.post("/api/teach/replay/prepare", json={"id": rid, "wait": True}).json()["state"] == "ready"
+    client.post("/api/teach/replay/go", json={})
+    time.sleep(0.4)
+    client.post("/api/disconnect", json={"hand": "left"})
+    deadline = time.monotonic() + 5
+    while (status := client.get("/api/teach/status").json()["replay"])["state"] == "playing":
+        assert time.monotonic() < deadline, "the replay did not end"
+        time.sleep(0.05)
+    assert status["state"] == "stopped" and status["message"] == "left: link lost"
+    assert status["hands"]["right"]["play_index"] == status["hands"]["right"]["frames"]
+    assert boards["sim-right"].model.replay_phase == ReplayPhase.HOLDING
+
+
 def test_websocket_reports_teach(client: TestClient) -> None:
     with client.websocket_connect("/ws") as ws:
         snapshot = ws.receive_json()

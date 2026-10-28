@@ -297,6 +297,7 @@ export interface PlayerHand {
   sent: number;
   underruns: number;
   servo_ids: number[];
+  ended: string; // why this hand left the replay early
 }
 
 export interface PlayerStatus {

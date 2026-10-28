@@ -279,7 +279,7 @@
         {#if busy}<button class="danger" onclick={stopReplay}>Stop (hold pose)</button>{/if}
       </div>
       <table>
-        <thead><tr><th>hand</th><th>board phase</th><th>frame</th><th>buffered ahead</th><th>underruns</th></tr></thead>
+        <thead><tr><th>hand</th><th>board phase</th><th>frame</th><th>buffered ahead</th><th>underruns</th><th></th></tr></thead>
         <tbody>
           {#each Object.entries(replay?.hands ?? {}) as [h, s] (h)}
             <tr>
@@ -288,6 +288,7 @@
               <td class="num">{s.play_index} / {s.frames}</td>
               <td class="num">{s.sent - s.play_index}</td>
               <td class="num {s.underruns ? 'warn' : ''}">{s.underruns}</td>
+              <td class="warn">{s.ended}</td>
             </tr>
           {/each}
         </tbody>

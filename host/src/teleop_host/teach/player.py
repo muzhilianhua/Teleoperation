@@ -67,6 +67,7 @@ class HandPlan:
     buffered_until: int = 0
     underruns: int = 0
     lost: bool = False
+    ended: str = ""  # why this hand left the replay early; the other hands play on
 
 
 @dataclass(slots=True)
@@ -211,10 +212,12 @@ class Player:
                 "sent": p.sent,
                 "underruns": p.underruns,
                 "servo_ids": p.servo_ids,
+                "ended": p.ended,
             }
             for hand, p in self._plans.items()
         }
-        played = min((p.play_index for p in self._plans.values()), default=0)
+        playing = [p.play_index for p in self._plans.values() if not p.ended]
+        played = min(playing or [p.play_index for p in self._plans.values()], default=0)
         return PlayerStatus(
             self.state,
             self.message,
@@ -293,38 +296,61 @@ class Player:
         for plan in self._plans.values():
             plan.phase = ReplayPhase.PLAYING
         self._set(PlayerState.PLAYING, "playing", "playing")
+        # From here on the hands are independent: one that drops out (link lost,
+        # disarmed, fault) is set aside and the others play to their end.
         while True:
             for hand, plan in self._plans.items():
-                self._feed(hand, plan)
-            self._check_hands()
-            if all(p.phase == ReplayPhase.HOLDING for p in self._plans.values()):
+                if not plan.ended:
+                    plan.ended = self._ended(hand, plan)
+                if not plan.ended:
+                    self._feed(hand, plan)
+            if all(p.ended or p.phase == ReplayPhase.HOLDING for p in self._plans.values()):
                 break
             await asyncio.sleep(TICK_S)
-        short = [h for h, p in self._plans.items() if p.play_index < len(p.frames)]
-        if short:
-            raise RuntimeError(f"{', '.join(short)}: stopped before the end (buffer ran dry or replay stop)")
         self._task = None
-        self._set(PlayerState.DONE, "finished: holding the last pose until disarmed", "done")
+        problems = [
+            f"{h}: {p.ended}" if p.ended else f"{h}: stopped at frame {p.play_index} of {len(p.frames)}"
+            for h, p in self._plans.items()
+            if p.ended or p.play_index < len(p.frames)
+        ]
+        if problems:
+            self._set(PlayerState.STOPPED, "; ".join(problems), "stopped")
+        else:
+            self._set(PlayerState.DONE, "finished: holding the last pose until disarmed", "done")
+
+    def _ended(self, hand: str, plan: HandPlan) -> str:
+        device = self._hands.device(hand)
+        if plan.lost or device is None or not device.connected:
+            return "link lost"
+        if plan.phase == ReplayPhase.IDLE:
+            return "replay ended on the board (disarmed, E-stop or a fault)"
+        return ""
 
     def _check_hands(self) -> None:
+        """While preparing, any hand dropping out ends the whole replay."""
         for hand, plan in self._plans.items():
-            if plan.lost or self._hands.device(hand) is None:
+            reason = self._ended(hand, plan)
+            if reason == "link lost":
                 raise RuntimeError(f"{hand}: link lost")
-            if plan.phase == ReplayPhase.IDLE:
-                raise ReplayEnded(f"{hand}: replay ended on the board (disarmed, E-stop or a fault)")
+            if reason:
+                raise ReplayEnded(f"{hand}: {reason}")
 
     def _feed(self, hand: str, plan: HandPlan) -> None:
         now = self._clock()
         if plan.buffered_until < plan.sent and now - plan.last_send > RESEND_S:
             plan.sent = max(plan.buffered_until, plan.play_index)  # chunks were dropped on the way
         lead = round(LEAD_S * self._rate)
-        device = self._device(hand)
+        device = self._hands.device(hand)
+        if device is None:
+            plan.ended = "link lost"
+            return
         while plan.sent < len(plan.frames) and plan.sent - plan.play_index < lead:
             count = min(CHUNK_FRAMES, len(plan.frames) - plan.sent, lead - (plan.sent - plan.play_index))
             end = plan.sent + count == len(plan.frames)
             chunk = ReplayChunk(plan.sent, plan.mask, plan.frames[plan.sent : plan.sent + count], end)
             if not device.send_replay(chunk):
-                raise RuntimeError(f"{hand}: link lost")
+                plan.ended = "link lost"
+                return
             plan.sent += count
             plan.last_send = now
 
