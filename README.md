@@ -24,7 +24,7 @@ Design document: <https://claude.ai/artifact/81sxWeamYJnzXBLv281o2v>
 | MCU | ESP32-S3-WROOM-2-N32R16V DevKit |
 | Encoders | AS5048B × 9 on one I2C bus: SDA GPIO8, SCL GPIO9, 400 kHz. Right glove `0x08 0x0C … 0x28`, left glove `0x40 0x44 … 0x60` (encoder #0–#8) |
 | Servo bus | IDs 1–9, mixed models (see *Joints*), via the FE-URT-2 TTL port at 1 Mbps: GPIO17 (TX) → URT-2 RX, GPIO18 (RX) ← URT-2 TX, common GND |
-| Servo power | ~6 V. The supervisor switches the hand off outside 5.5–6.5 V. **Use a supply with ample current before full-hand or grasp tests**: servo_bringup recorded 6 V sag tripping every servo at once |
+| Servo power | ~6 V. The supervisor switches the hand off when the median servo voltage stays outside 5.5–6.5 V for 200 ms (adjustable, see `set supplymin`). **Use a supply with ample current before full-hand or grasp tests**: servo_bringup recorded 6 V sag tripping every servo at once |
 | E-stop | DevKit BOOT button (GPIO0); the GUI's E-STOP stops both hands |
 | Hand strap | GPIO4: open = right hand, tied to GND = left hand (read once at boot) |
 | Console | Native USB port (`USB` connector), 115200 |
@@ -209,7 +209,7 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 **Choosing `ilimit`.** Take the smallest of three bounds, then the lowest value that still holds the object:
 1. *Motor*: at most the full-voltage stall current V / R. The factory protection current (5.2 A) is a ceiling, not a working value.
 2. *Heat*: winding loss is I²R. With the thermal resistance R_th and time constant τ measured on the bench, the continuous current is I_cont = √((T_max − T_amb) / (R · R_th)), with T_max ≈ 55 °C to stay clear of the 65 °C trip. A held grasp runs at `gripload` × cap, so cap ≤ I_cont / 0.6.
-3. *Supply*: in fast motion the duty approaches 100 % and supply current approaches the cap, so Σ caps (+ SCS stall currents) ≤ 70–80 % of the supply rating, and the servo voltage must stay above 5.5 V.
+3. *Supply*: in fast motion the duty approaches 100 % and supply current approaches the cap, so Σ caps (+ SCS stall currents) ≤ 70–80 % of the supply rating, and the servo voltage must stay above `supplymin` (default 5.5 V).
 
 Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on`):
 - **Units and R.** Hold a few currents below the cap (adjust `grip`, or `set <j> itrip 0` to hold at the cap; the servo's own cut-out still acts). Check `current_ma × load / 100` against the supply ammeter with only this servo loaded: if they agree, the 6.5 mA unit is right; if they differ by a fixed factor, the unit is wrong. Stalled: R ≈ V × load% / I.
@@ -257,6 +257,7 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 | `set <j> itrip <%>` | HLS over-current trip as % of the cap: 0 = off, 50–100, default 90. Allowed while armed; not saved |
 | `set lead\|mincut\|beta\|jump\|gripload <v>` | Global parameters. Allowed while armed |
 | `set loadtrip on\|off` | Firmware load trips (off = only the servo's overload protection decides) |
+| `set supplymin\|supplymax <V>` / `set supplyms <ms>` | Supply window: the hand goes off when the median servo voltage stays outside `supplymin`..`supplymax` for `supplyms`. Defaults 5.5 / 6.5 V, 200 ms; allowed 4.5–6.0 / 6.0–7.4 V (SCS0009 input 4–7.4 V), 50–1000 ms. Stored in NVS. Widen it only after measuring where the voltage drops |
 | `sweep <j>` / `sweep <j> apply` | Measure speed and suggest `vmax`/`vsat` / apply the suggestion. `sweep <j>` is disarmed only |
 | `limits check` / `limits write <j\|all>` | Compare / sync the servos' angle-limit registers with the travel. Writes only differing values; power-cycle HLS servos afterwards. Disarmed only |
 | `save` / `load` / `defaults` / `dump` | Write NVS / reload / reset to defaults in RAM / print as commands |
@@ -278,7 +279,7 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 | Scope | Faults | Action |
 |---|---|---|
 | Joint | Load trip (only when `loadtrip on`), overheat, over-current (HLS), tracking lag, servo error (overload, over-current, angle sensor), encoder lost > 3 s | Only that joint goes off. `joints` shows why; `arm <j>` brings it back |
-| Hand | Supply voltage, servo voltage error, torque mismatch, comm lost (3 failed reads or no good read for 100 ms), E-stop | Every servo goes off |
+| Hand | Supply voltage (median servo voltage outside the supply window), servo voltage error, torque mismatch, comm lost (3 failed reads or no good read for 100 ms), E-stop | Every servo goes off |
 
 **Servo reads.**
 - Full status reads are round-robin, 3 servos per cycle, so each servo is read about every 30 ms with 9 enabled.
@@ -302,7 +303,8 @@ The goal is written before torque on, which is safe whether or not an HLS3606 go
 - Torque-off is broadcast to all 9 servos at boot and on E-stop: the servos have no communication watchdog.
 - `save`, `limits` and `sweep` are refused while any joint is armed.
 
-**NVS.** Format version 4 is 258 bytes and holds, per joint, the servo model and `ilimit` besides the M2 fields.
+**NVS.** Format version 5 is 268 bytes and holds, per joint, the servo model and `ilimit` besides the M2 fields, and the supply window.
+- Version 4 (258 bytes, before the supply window) loads with the window at its defaults; `save` stores it as version 5.
 - Versions 1–3 were saved for the hand before the rebuild (other ids and servos) and are discarded.
 - Missing, corrupt or unknown-version data is rejected, and defaults are used.
 - A joint whose stored model differs from `config.h` is reset to its defaults; the other joints keep their settings.
