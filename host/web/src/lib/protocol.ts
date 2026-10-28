@@ -251,3 +251,71 @@ export interface TripRecord {
   text: string;
   hands: Record<string, PowerWindow>;
 }
+
+// ---- teach (GET /api/teach/*, WebSocket `teach` / `teach_event`) ----------------------
+
+export interface Marker {
+  t: number; // s from the start of the recording
+  label: string;
+}
+
+export interface RecordingHand {
+  firmware: string;
+  board_id: string;
+  joints: { servo_id: number; name: string; model: number }[];
+  active: number[]; // servo ids that followed the glove: the ones replayed
+  samples: number;
+  dropped: number;
+}
+
+export interface RecordingMeta {
+  id: string;
+  name: string;
+  created: string;
+  duration_s: number;
+  hands: Record<string, RecordingHand>;
+  markers: Marker[];
+}
+
+export interface RecorderStatus {
+  recording: boolean;
+  name: string;
+  hands: string[];
+  elapsed_s: number;
+  samples: Record<string, number>;
+  dropped: Record<string, number>;
+  markers: Marker[];
+  waiting_s: number;
+}
+
+export type PlayerState = 'idle' | 'preparing' | 'ready' | 'playing' | 'done' | 'stopped' | 'error';
+
+export interface PlayerHand {
+  phase: string; // idle | loading | approach | ready | playing | holding
+  play_index: number;
+  frames: number;
+  sent: number;
+  underruns: number;
+  servo_ids: number[];
+}
+
+export interface PlayerStatus {
+  state: PlayerState;
+  message: string;
+  recording_id: string;
+  name: string;
+  speed: number;
+  duration_s: number;
+  position_s: number;
+  hands: Record<string, PlayerHand>;
+}
+
+export interface TeachStatus {
+  record: RecorderStatus;
+  replay: PlayerStatus;
+}
+
+export interface RecordingPreview {
+  meta: RecordingMeta;
+  hands: Record<string, { t: number[]; active: number[]; joints: Record<string, { goal: number[]; pos: number[]; exo_deg: number[] }> }>;
+}

@@ -14,6 +14,7 @@ export interface PageDef {
 export const corePages: PageDef[] = [
   { id: 'dashboard', title: 'Dashboard', group: 'Operate', load: () => import('../pages/Dashboard.svelte') },
   { id: 'plots', title: 'Plots', group: 'Operate', load: () => import('../pages/Plots.svelte') },
+  { id: 'teach', title: 'Teach', group: 'Operate', load: () => import('../pages/Teach.svelte') },
   { id: 'calibration', title: 'Calibration', group: 'Setup', load: () => import('../pages/Calibration.svelte') },
   { id: 'servo-setup', title: 'Servo setup', group: 'Setup', load: () => import('../pages/ServoSetup.svelte') },
   { id: 'parameters', title: 'Parameters', group: 'Setup', load: () => import('../pages/Parameters.svelte') },

@@ -5,12 +5,12 @@ from __future__ import annotations
 from .base import Plugin
 
 
-class Recording(Plugin):
-    id = "recording"
-    title = "Recording"
+class DatasetExport(Plugin):
+    id = "dataset"
+    title = "Dataset export"
     description = (
-        "M3: record full-rate telemetry (exo, target, present at 100 Hz with device timestamps) and camera "
-        "frames into a dataset, with host/device clock alignment."
+        "M3: turn Teach recordings (100 Hz, host-aligned time, markers) plus camera frames into a training dataset. "
+        "Recording itself is on the Teach page."
     )
 
 
@@ -35,4 +35,4 @@ class Camera(Plugin):
 
 
 def placeholders() -> list[Plugin]:
-    return [Recording(), FilterTuning(), ParameterTuning(), Camera()]
+    return [DatasetExport(), FilterTuning(), ParameterTuning(), Camera()]

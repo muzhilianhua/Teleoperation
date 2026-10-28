@@ -3,7 +3,17 @@
 // shortcuts; `app.hands.right|left` reach a specific one. Telemetry and slow
 // status are replaced wholesale ($state.raw) at up to 30 Hz per hand.
 
-import type { DeviceEvent, DeviceInfo, LinkInfo, PluginInfo, PowerWindow, SlowStatus, Telemetry, TripRecord } from './protocol';
+import type {
+  DeviceEvent,
+  DeviceInfo,
+  LinkInfo,
+  PluginInfo,
+  PowerWindow,
+  SlowStatus,
+  TeachStatus,
+  Telemetry,
+  TripRecord,
+} from './protocol';
 
 export type HandId = 'right' | 'left';
 export const HANDS: HandId[] = ['right', 'left'];
@@ -88,6 +98,8 @@ class AppState {
   plugins = $state.raw<PluginInfo[]>([]);
   power = $state.raw<Partial<Record<HandId, PowerWindow>>>({});
   trips = $state.raw<TripRecord[]>([]); // newest first
+  teach = $state.raw<TeachStatus | null>(null);
+  recordingsVersion = $state(0); // bumped when the list of recordings changed (any tab)
   toasts = $state<Toast[]>([]);
   activity = $state.raw<ActivityEntry[]>([]);
 

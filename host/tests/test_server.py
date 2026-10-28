@@ -55,7 +55,7 @@ def test_hands_rest(client: TestClient, boards) -> None:
     assert client.get("/api/middle/info").status_code == 404
     assert set(client.post("/api/estop").json()["reached"]) == {"right", "left"}
     assert {p["device"] for p in client.get("/api/ports").json()["ports"]} >= {"sim-right", "sim-left"}
-    assert {p["id"] for p in client.get("/api/plugins").json()} >= {"recording", "camera"}
+    assert {p["id"] for p in client.get("/api/plugins").json()} >= {"dataset", "camera"}
 
 
 def test_disconnecting_one_hand_leaves_the_other(client: TestClient) -> None:

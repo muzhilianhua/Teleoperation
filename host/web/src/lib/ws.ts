@@ -19,6 +19,27 @@ const unreachable = (text: string, error = 'GUI server unreachable'): CommandRes
 
 const isHand = (h: unknown): h is HandId => h === 'right' || h === 'left';
 
+function teachEvent(e: { kind: string; message?: string; recording?: { name: string } }): void {
+  switch (e.kind) {
+    case 'record_saved':
+      app.recordingsVersion += 1;
+      app.toast('success', `Recording saved: ${e.recording?.name ?? ''}`);
+      break;
+    case 'replay_ready':
+      app.toast('info', 'Replay ready at the first frame');
+      break;
+    case 'replay_done':
+      app.toast('success', 'Replay finished: holding the last pose until disarmed', 6000);
+      break;
+    case 'replay_stopped':
+      app.toast('info', `Replay stopped: ${e.message ?? ''}`, 6000);
+      break;
+    case 'replay_error':
+      app.toast('error', `Replay failed: ${e.message ?? ''}`, 8000);
+      break;
+  }
+}
+
 class Socket {
   private ws: WebSocket | null = null;
   private nextId = 1;
@@ -60,6 +81,7 @@ class Socket {
         app.plugins = m.data.plugins;
         app.power = m.data.power ?? {};
         app.trips = [...(m.data.trips ?? [])].reverse();
+        app.teach = m.data.teach ?? null;
         for (const h of HANDS) {
           const s = m.data.hands[h];
           const state = app.hands[h];
@@ -102,6 +124,12 @@ class Socket {
       case 'trip':
         app.trips = [m.data, ...app.trips].slice(0, 50);
         app.toast('error', `${m.data.hand} hand: ${m.data.fault} (see Power)`, 6000);
+        break;
+      case 'teach':
+        app.teach = m.data;
+        break;
+      case 'teach_event':
+        teachEvent(m.data);
         break;
       case 'notice':
         app.toast('error', m.data.text, 10000);
