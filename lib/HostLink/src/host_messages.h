@@ -30,6 +30,7 @@ enum class MsgType : uint8_t {
   TelemConfig = 0x05,
   HostExit = 0x06,
   GetInfo = 0x07,
+  ReplayData = 0x08,
   // device -> host
   Hello = 0x81,
   Telemetry = 0x82,
@@ -40,6 +41,7 @@ enum class MsgType : uint8_t {
   Config = 0x87,
   Log = 0x88,
   Bye = 0x89,
+  ReplayStatus = 0x8A,
 };
 
 constexpr uint8_t kFlagReplyExpected = 0x01;  // header flags
@@ -284,6 +286,7 @@ enum class EventCode : uint8_t {
   Defaults,
   SettingChanged,  // joint (0 = global)
   Monitor,         // args: on
+  Replay,          // args: phase, play index, joint mask
   Count
 };
 
@@ -316,5 +319,37 @@ enum class ByeReason : uint8_t { HostExit = 0, HeartbeatTimeout = 1 };
 
 bool decodeHostHello(const uint8_t* in, size_t length, HostHello& h);
 bool decodeTelemConfig(const uint8_t* in, size_t length, TelemConfig& c);
+
+// ---- Replay (taught motion played back) ----------------------------------------
+
+constexpr uint8_t kReplayEnd = 0x01;  // REPLAY_DATA flags: last chunk of the stream
+constexpr size_t kReplayDataHeader = 8;
+
+// REPLAY_DATA: firstIndex u32 | jointMask u16 | flags u8 | count u8 |
+// positions i16 x count x popcount(jointMask), frame by frame in joint order.
+struct ReplayChunk {
+  uint32_t firstIndex = 0;
+  uint16_t jointMask = 0;  // bit i = joint index i of the joint table
+  uint8_t flags = 0;
+  uint8_t count = 0;  // frames
+};
+
+// Decodes the header and copies the positions into `positions` (capacity in
+// values). False if the payload length does not match or does not fit.
+bool decodeReplayData(const uint8_t* in, size_t length, ReplayChunk& chunk, int16_t* positions, size_t capacity);
+size_t encodeReplayData(const ReplayChunk& chunk, const int16_t* positions, uint8_t* out, size_t capacity);
+
+enum class ReplayPhase : uint8_t { Idle = 0, Loading, Approach, Ready, Playing, Holding };
+
+struct ReplayStatus {  // 15 B
+  uint8_t phase = 0;
+  uint32_t playIndex = 0;
+  uint32_t bufferedUntil = 0;
+  uint32_t underruns = 0;
+  uint16_t jointMask = 0;
+};
+
+size_t encodeReplayStatus(const ReplayStatus& s, uint8_t* out, size_t capacity);
+bool decodeReplayStatus(const uint8_t* in, size_t length, ReplayStatus& s);
 
 }  // namespace hostlink

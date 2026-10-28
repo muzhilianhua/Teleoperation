@@ -20,6 +20,9 @@ from teleop_host.protocol.messages import (
     HostHello,
     JointInfo,
     MsgType,
+    ReplayChunk,
+    ReplayPhase,
+    ReplayStatus,
     SlowEncoder,
     SlowJoint,
     SlowStatus,
@@ -165,3 +168,14 @@ def test_replies_and_host_hello() -> None:
     assert Ack.decode(bytes([7, 0, 1]) + b"bad") == Ack(7, 1, "bad")
     assert Done.decode(bytes([2, 1, 1])) == Done(0x0102, False)
     assert HostHello(heartbeat_timeout_ms=1000, telemetry_divider=2).encode() == bytes([1, 1, 0xE8, 3, 2, 10])
+
+
+def test_replay_messages_golden() -> None:
+    chunk = ReplayChunk(1000, 0b101, [[100, -100], [101, -101]], end=True)
+    assert chunk.encode() == golden("kGoldenReplayDataHex")
+    assert ReplayChunk.decode(golden("kGoldenReplayDataHex")) == chunk
+    with pytest.raises(ValueError):
+        ReplayChunk(0, 0b111, [[1, 2]]).encode()
+    status = ReplayStatus(ReplayPhase.PLAYING, 1234, 1300, 2, 0b101)
+    assert status.encode() == golden("kGoldenReplayStatusHex")
+    assert decode_device_message(MsgType.REPLAY_STATUS, golden("kGoldenReplayStatusHex")) == status

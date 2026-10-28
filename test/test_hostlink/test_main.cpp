@@ -476,6 +476,38 @@ void test_replies_and_host_messages() {
   TEST_ASSERT_EQUAL(0, c.slowDivider);
 }
 
+void test_replay_messages_golden() {
+  ReplayChunk chunk;
+  chunk.firstIndex = 1000;
+  chunk.jointMask = 0b101;
+  chunk.flags = kReplayEnd;
+  chunk.count = 2;
+  const int16_t positions[] = {100, -100, 101, -101};
+  uint8_t out[64];
+  size_t n = encodeReplayData(chunk, positions, out, sizeof(out));
+  assertBytes(kGoldenReplayDataHex, out, n);
+  ReplayChunk back;
+  int16_t values[8];
+  TEST_ASSERT_TRUE(decodeReplayData(out, n, back, values, 8));
+  TEST_ASSERT_EQUAL(1000, back.firstIndex);
+  TEST_ASSERT_EQUAL(2, back.count);
+  TEST_ASSERT_EQUAL(-101, values[3]);
+  TEST_ASSERT_FALSE(decodeReplayData(out, n - 1, back, values, 8));  // short payload
+  TEST_ASSERT_FALSE(decodeReplayData(out, n, back, values, 3));      // does not fit
+
+  ReplayStatus status;
+  status.phase = static_cast<uint8_t>(ReplayPhase::Playing);
+  status.playIndex = 1234;
+  status.bufferedUntil = 1300;
+  status.underruns = 2;
+  status.jointMask = 0b101;
+  n = encodeReplayStatus(status, out, sizeof(out));
+  assertBytes(kGoldenReplayStatusHex, out, n);
+  ReplayStatus s2;
+  TEST_ASSERT_TRUE(decodeReplayStatus(out, n, s2));
+  TEST_ASSERT_EQUAL(1300, s2.bufferedUntil);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_crc16_check_value);
@@ -497,5 +529,6 @@ int main(int, char**) {
   RUN_TEST(test_full_hand_slow_status_size);
   RUN_TEST(test_event_golden_vector_and_round_trip);
   RUN_TEST(test_replies_and_host_messages);
+  RUN_TEST(test_replay_messages_golden);
   return UNITY_END();
 }

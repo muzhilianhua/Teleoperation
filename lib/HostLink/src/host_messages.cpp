@@ -350,4 +350,58 @@ bool decodeTelemConfig(const uint8_t* in, size_t length, TelemConfig& c) {
   return r.ok();
 }
 
+// ---- replay ------------------------------------------------------------------------
+
+namespace {
+uint8_t jointsIn(uint16_t mask) {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < 16; ++i) n += (mask >> i) & 1u;
+  return n;
+}
+}  // namespace
+
+bool decodeReplayData(const uint8_t* in, size_t length, ReplayChunk& chunk, int16_t* positions, size_t capacity) {
+  ByteReader r(in, length);
+  chunk.firstIndex = r.u32();
+  chunk.jointMask = r.u16();
+  chunk.flags = r.u8();
+  chunk.count = r.u8();
+  if (!r.ok()) return false;
+  const size_t values = static_cast<size_t>(chunk.count) * jointsIn(chunk.jointMask);
+  if (r.remaining() != values * 2 || values > capacity) return false;
+  for (size_t i = 0; i < values; ++i) positions[i] = r.i16();
+  return r.ok();
+}
+
+size_t encodeReplayData(const ReplayChunk& chunk, const int16_t* positions, uint8_t* out, size_t capacity) {
+  ByteWriter w(out, capacity);
+  w.u32(chunk.firstIndex);
+  w.u16(chunk.jointMask);
+  w.u8(chunk.flags);
+  w.u8(chunk.count);
+  const size_t values = static_cast<size_t>(chunk.count) * jointsIn(chunk.jointMask);
+  for (size_t i = 0; i < values; ++i) w.i16(positions[i]);
+  return finish(w);
+}
+
+size_t encodeReplayStatus(const ReplayStatus& s, uint8_t* out, size_t capacity) {
+  ByteWriter w(out, capacity);
+  w.u8(s.phase);
+  w.u32(s.playIndex);
+  w.u32(s.bufferedUntil);
+  w.u32(s.underruns);
+  w.u16(s.jointMask);
+  return finish(w);
+}
+
+bool decodeReplayStatus(const uint8_t* in, size_t length, ReplayStatus& s) {
+  ByteReader r(in, length);
+  s.phase = r.u8();
+  s.playIndex = r.u32();
+  s.bufferedUntil = r.u32();
+  s.underruns = r.u32();
+  s.jointMask = r.u16();
+  return r.ok();
+}
+
 }  // namespace hostlink

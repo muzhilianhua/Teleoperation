@@ -45,6 +45,7 @@ crc16      = CRC16-CCITT-FALSE (poly 0x1021, init 0xFFFF) over header and payloa
 | 0x05 | TELEM_CONFIG | `telemetryDivider u8`, `slowDivider u8` |
 | 0x06 | HOST_EXIT | empty |
 | 0x07 | GET_INFO | empty. The device answers with HELLO |
+| 0x08 | REPLAY_DATA | Replay frames (see *Replay*) |
 
 **COMMAND replies**
 
@@ -71,6 +72,7 @@ crc16      = CRC16-CCITT-FALSE (poly 0x1021, init 0xFFFF) over header and payloa
 | 0x87 | CONFIG | `ackSeq u16`, `format u8` (0 = dump text), `text` |
 | 0x88 | LOG | `source u8` (0 console, 1 ESP log, 2 boot), `text`: one printed line |
 | 0x89 | BYE | `reason u8` (0 host exit, 1 heartbeat timeout) |
+| 0x8A | REPLAY_STATUS | 20 Hz while a replay is set up or playing (see *Replay*) |
 
 ### HELLO
 
@@ -178,6 +180,35 @@ encoderCount u8, then per encoder:
 | 15 | defaults | — | — |
 | 16 | setting_changed | id, or 0 = global | — |
 | 17 | monitor | — | on |
+| 18 | replay | — | phase, play index, joint mask |
+
+## Replay
+
+Taught motion is played back from the host. It streams numbered frames ahead of playback into a 256-frame ring buffer (2.56 s), and the control task takes one frame per cycle on its own 100 Hz clock.
+
+```
+REPLAY_DATA    firstIndex u32 | jointMask u16 | flags u8 (bit0 = last chunk) | count u8
+               | positions i16 x count x popcount(jointMask), frame by frame in joint order
+REPLAY_STATUS  phase u8 | playIndex u32 | bufferedUntil u32 | underruns u32 | jointMask u16
+```
+
+**Frames**
+- A frame holds a goal in servo steps for each joint in `jointMask`. Bit *i* is joint index *i* of the HELLO joint table.
+- Frames must arrive in order. A chunk that overlaps frames already buffered keeps only its new tail; a chunk that would leave a gap is ignored.
+- The host resends from `bufferedUntil` and keeps the buffer about 1 s ahead of `playIndex`.
+
+**Phases**: 0 idle, 1 loading, 2 approach, 3 ready, 4 playing, 5 holding.
+
+**Commands** (COMMAND frames; disarmed joints only):
+- `replay begin`: clear the buffer and start loading.
+- `replay start`: arm the joints in the mask and move them to the first frame at the arm speed. The phase becomes *ready* once every joint is there.
+- `replay go`: play.
+- `replay stop`: hold where the joints are.
+
+**Playback**
+- Played goals pass through the rate limiter, grip limiter and supervisor, like teleoperation.
+- If the buffer runs dry, the joints hold; after 0.5 s the replay stops and they keep holding.
+- After the last frame, the joints hold the final pose until `disarm`.
 
 ## Budget
 

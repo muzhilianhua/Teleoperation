@@ -14,7 +14,7 @@ namespace {
 const char* const kEventNames[] = {"generic",    "refused",      "armed",        "disarmed",   "torque_off",
                                    "fault",      "joint_state",  "cal_captured", "homed",      "ping_result",
                                    "limits_row", "sweep_run",    "sweep_done",   "config_saved", "config_loaded",
-                                   "defaults",   "setting_changed", "monitor"};
+                                   "defaults",   "setting_changed", "monitor",   "replay"};
 static_assert(sizeof(kEventNames) / sizeof(kEventNames[0]) == static_cast<size_t>(hostlink::EventCode::Count),
               "one name per event code");
 

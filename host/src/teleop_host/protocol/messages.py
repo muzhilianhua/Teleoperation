@@ -37,6 +37,9 @@ __all__ = [
     "Telemetry",
     "TelemetryJoint",
     "decode_device_message",
+    "ReplayChunk",
+    "ReplayPhase",
+    "ReplayStatus",
     "DeviceMessage",
 ]
 
@@ -49,6 +52,7 @@ class MsgType(IntEnum):
     TELEM_CONFIG = 0x05
     HOST_EXIT = 0x06
     GET_INFO = 0x07
+    REPLAY_DATA = 0x08
     HELLO = 0x81
     TELEMETRY = 0x82
     SLOW_STATUS = 0x83
@@ -58,6 +62,7 @@ class MsgType(IntEnum):
     CONFIG = 0x87
     LOG = 0x88
     BYE = 0x89
+    REPLAY_STATUS = 0x8A
 
 
 class EventCode(IntEnum):
@@ -79,6 +84,7 @@ class EventCode(IntEnum):
     DEFAULTS = 15
     SETTING_CHANGED = 16
     MONITOR = 17
+    REPLAY = 18
 
 
 class Severity(IntEnum):
@@ -652,7 +658,69 @@ class Bye:
         return cls(data[0])
 
 
-DeviceMessage = DeviceInfo | Telemetry | SlowStatus | Event | Ack | Done | Config | Log | Bye
+# ---- replay (taught motion played back) -----------------------------------------
+
+REPLAY_END = 0x01
+
+
+class ReplayPhase(IntEnum):
+    IDLE = 0
+    LOADING = 1
+    APPROACH = 2
+    READY = 3
+    PLAYING = 4
+    HOLDING = 5
+
+
+@dataclass(slots=True)
+class ReplayChunk:
+    """REPLAY_DATA: frames[i] holds one goal per joint in joint_mask, in joint order."""
+
+    first_index: int
+    joint_mask: int
+    frames: list[list[int]]
+    end: bool = False
+
+    _HEAD = struct.Struct("<IHBB")
+
+    def encode(self) -> bytes:
+        width = bin(self.joint_mask).count("1")
+        values = [v for frame in self.frames for v in frame]
+        if any(len(frame) != width for frame in self.frames):
+            raise ValueError("frame width does not match the joint mask")
+        head = self._HEAD.pack(self.first_index, self.joint_mask, REPLAY_END if self.end else 0, len(self.frames))
+        return head + struct.pack(f"<{len(values)}h", *values)
+
+    @classmethod
+    def decode(cls, data: bytes) -> ReplayChunk:
+        first, mask, flags, count = cls._HEAD.unpack_from(data)
+        width = bin(mask).count("1")
+        if len(data) != cls._HEAD.size + 2 * width * count:
+            raise struct.error("REPLAY_DATA length does not match its header")
+        values = struct.unpack_from(f"<{width * count}h", data, cls._HEAD.size)
+        frames = [list(values[i * width : (i + 1) * width]) for i in range(count)]
+        return cls(first, mask, frames, bool(flags & REPLAY_END))
+
+
+@dataclass(slots=True)
+class ReplayStatus:
+    phase: int = ReplayPhase.IDLE
+    play_index: int = 0
+    buffered_until: int = 0
+    underruns: int = 0
+    joint_mask: int = 0
+
+    _S = struct.Struct("<BIIIH")
+
+    def encode(self) -> bytes:
+        return self._S.pack(self.phase, self.play_index, self.buffered_until, self.underruns, self.joint_mask)
+
+    @classmethod
+    def decode(cls, data: bytes) -> ReplayStatus:
+        return cls(*cls._S.unpack_from(data))
+
+
+DeviceMessage = DeviceInfo | Telemetry | SlowStatus | Event | Ack | Done | Config | Log | Bye | ReplayStatus
 
 _DECODERS = {
     MsgType.HELLO: DeviceInfo.decode,
@@ -664,6 +732,7 @@ _DECODERS = {
     MsgType.CONFIG: Config.decode,
     MsgType.LOG: Log.decode,
     MsgType.BYE: Bye.decode,
+    MsgType.REPLAY_STATUS: ReplayStatus.decode,
 }
 
 
