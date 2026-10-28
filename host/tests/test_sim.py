@@ -148,3 +148,32 @@ def test_left_hand_simulator() -> None:
     assert info.hand == 2
     config = next(m for m in s.command("dump") if isinstance(m, Config))
     assert "# hand left" in config.text
+
+
+def test_replay_phases_in_the_simulator() -> None:
+    from teleop_host.protocol.messages import ReplayChunk, ReplayPhase, ReplayStatus
+
+    s = Session()
+    s.open()
+    assert done(s.command("set 2 on")).ok
+    assert not done(s.command("replay go")).ok  # nothing set up
+    assert done(s.command("replay begin")).ok
+    joint = s.dev.model.joints[1]
+    start = round(joint.position)
+    frames = [[start + i] for i in range(60)]  # joint index 1 = servo 2
+    s.send(MsgType.REPLAY_DATA, ReplayChunk(0, 0b10, frames[:30]).encode())
+    s.send(MsgType.REPLAY_DATA, ReplayChunk(30, 0b10, frames[30:], end=True).encode())
+    assert done(s.command("replay start")).ok
+    assert not done(s.command("arm")).ok  # teleoperation is refused during a replay
+    for _ in range(50):
+        s.dev.step(s.now)
+    assert s.dev.model.replay_phase == ReplayPhase.READY
+    assert done(s.command("replay go")).ok
+    for _ in range(100):
+        s.dev.step(s.now)
+    statuses = [m for m in s.receive() if isinstance(m, ReplayStatus)]
+    assert statuses and statuses[-1].phase == ReplayPhase.HOLDING and statuses[-1].play_index == 60
+    assert abs(joint.goal - (start + 59)) < 1
+    assert done(s.command("disarm")).ok
+    s.dev.step(s.now)
+    assert s.dev.model.replay_phase == ReplayPhase.IDLE

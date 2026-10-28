@@ -17,6 +17,9 @@ from ..protocol.messages import (
     EventCode,
     JointFlag,
     JointInfo,
+    ReplayChunk,
+    ReplayPhase,
+    ReplayStatus,
     Severity,
     SlowEncoder,
     SlowJoint,
@@ -31,8 +34,11 @@ NO_ENCODER = 0xFF
 SCS, HLS = 1, 2
 STEP_SCALE = {SCS: 1.0, HLS: (300.0 / 1024.0) / (360.0 / 4096.0)}
 MAX_SPEED = {SCS: 1000, HLS: 12492}
-OFF, ALIGN, FOLLOW, HOLD, SWEEP = range(5)
-STATE_NAMES = ["OFF", "ALIGN", "FOLLOW", "HOLD", "SWEEP"]
+OFF, ALIGN, FOLLOW, HOLD, SWEEP, REPLAY = range(6)
+STATE_NAMES = ["OFF", "ALIGN", "FOLLOW", "HOLD", "SWEEP", "REPLAY"]
+REPLAY_CAPACITY = 256  # frames, as lib/TeleopCore/src/replay_buffer.h
+REPLAY_START_FRAMES = 50
+REPLAY_STARVE_S = 0.5
 FAULT_NAMES = [
     "none",
     "comm lost",
@@ -174,6 +180,13 @@ class HandModel:
         self.time = 0.0
         self.cycle = 0
         self.overruns = 0
+        self.replay_phase = ReplayPhase.IDLE
+        self.replay_frames: list[list[int]] = []  # buffered, oldest first, one value per joint index
+        self.replay_play = 0  # index of the next frame to play
+        self.replay_mask = 0
+        self.replay_end = False
+        self.replay_underruns = 0
+        self._replay_starve_t: float | None = None
         self._result: Result | None = None
 
     # ---- device info / telemetry ------------------------------------------------
@@ -339,9 +352,12 @@ class HandModel:
         """Advances one control cycle; returns unsolicited events."""
         self.time += dt
         self.cycle += 1
-        events: list[Event] = []
+        events: list[Event] = self._step_replay()
         for j in self.joints:
-            if j.state in (ALIGN, FOLLOW):
+            if j.state == REPLAY:
+                speed = 50 * j.scale if self.replay_phase == ReplayPhase.APPROACH else j.s.vmax
+                j.goal += max(-speed * dt, min(speed * dt, j.target - j.goal))
+            elif j.state in (ALIGN, FOLLOW):
                 exo = self.exo_counts(j)
                 t = min(1.0, max(0.0, exo / j.s.exo_b)) if j.s.exo_b else 0.0
                 j.target = j.s.servo_a + t * (j.s.servo_b - j.s.servo_a)
@@ -384,6 +400,123 @@ class HandModel:
                 f"`sweep {i} apply`, then `save`",
             ),
         ]
+
+    # ---- replay (mirrors the firmware's replay state) ------------------------------------
+
+    def replay_status(self) -> ReplayStatus:
+        return ReplayStatus(
+            self.replay_phase,
+            self.replay_play,
+            self.replay_play + len(self.replay_frames),
+            self.replay_underruns,
+            self.replay_mask,
+        )
+
+    def push_replay(self, chunk: ReplayChunk) -> None:
+        if self.replay_phase in (ReplayPhase.IDLE, ReplayPhase.HOLDING) or self.replay_end:
+            return
+        if self.replay_mask == 0 and self.replay_play == 0 and not self.replay_frames:
+            self.replay_mask = chunk.joint_mask
+        if chunk.joint_mask != self.replay_mask:
+            return
+        nxt = self.replay_play + len(self.replay_frames)
+        if chunk.first_index > nxt:
+            return  # gap: the host resends from buffered_until
+        fresh = chunk.frames[nxt - chunk.first_index :]
+        if len(self.replay_frames) + len(fresh) > REPLAY_CAPACITY:
+            return
+        indices = [i for i in range(len(self.joints)) if chunk.joint_mask & (1 << i)]
+        for values in fresh:
+            frame = [0] * len(self.joints)
+            for i, v in zip(indices, values, strict=True):
+                frame[i] = v
+            self.replay_frames.append(frame)
+        if chunk.end:
+            self.replay_end = True
+
+    def _replay_event(self, phase: ReplayPhase, text: str, severity: Severity = Severity.INFO) -> Event:
+        self.replay_phase = phase
+        args = (phase, self.replay_play, self.replay_mask)
+        return self._event(EventCode.REPLAY, 0, args, f"replay: {text}", severity)
+
+    def _replay_joints(self) -> list[Joint]:
+        return [j for i, j in enumerate(self.joints) if self.replay_mask & (1 << i) and j.state == REPLAY]
+
+    def _step_replay(self) -> list[Event]:
+        phase = self.replay_phase
+        if phase in (ReplayPhase.IDLE, ReplayPhase.LOADING):
+            return []
+        if not any(j.state == REPLAY for j in self.joints):
+            self._reset_replay()
+            return [self._replay_event(ReplayPhase.IDLE, "ended (no joint armed)")]
+        joints = self._replay_joints()
+        if phase == ReplayPhase.APPROACH and self.replay_frames:
+            frame = self.replay_frames[0]
+            for j in joints:
+                j.target = frame[self.joints.index(j)]
+            if all(abs(j.goal - j.target) <= 3 * j.scale for j in joints):
+                return [self._replay_event(ReplayPhase.READY, "ready at the first frame")]
+        elif phase == ReplayPhase.PLAYING:
+            if self.replay_frames:
+                frame = self.replay_frames.pop(0)
+                self.replay_play += 1
+                self._replay_starve_t = None
+                for j in joints:
+                    j.target = frame[self.joints.index(j)]
+            elif self.replay_end:
+                return [self._replay_event(ReplayPhase.HOLDING, "finished, holding the last pose")]
+            elif self._replay_starve_t is None:
+                self._replay_starve_t = self.time
+                self.replay_underruns += 1
+            elif self.time - self._replay_starve_t > REPLAY_STARVE_S:
+                return [self._replay_event(ReplayPhase.HOLDING, "buffer ran dry, holding", Severity.WARNING)]
+        return []
+
+    def _reset_replay(self) -> None:
+        self.replay_frames, self.replay_play, self.replay_mask = [], 0, 0
+        self.replay_end, self.replay_underruns, self._replay_starve_t = False, 0, None
+
+    def _cmd_replay(self, args: list[str]) -> None:
+        assert self._result is not None
+        action = args[0] if len(args) == 1 else ""
+        if action == "begin":
+            if any(j.armed() and j.state != REPLAY for j in self.joints):
+                self._refuse("replay begin refused: joints are armed for teleoperation; disarm first")
+                return
+            self._reset_replay()
+            self._result.events.append(self._replay_event(ReplayPhase.LOADING, "loading"))
+        elif action == "start":
+            if self.replay_phase != ReplayPhase.LOADING:
+                self._refuse("replay start refused: run `replay begin` and stream frames first")
+                return
+            if len(self.replay_frames) < REPLAY_START_FRAMES and not self.replay_end:
+                self._refuse(f"replay start refused: only {len(self.replay_frames)} frames buffered")
+                return
+            chosen = [j for i, j in enumerate(self.joints) if self.replay_mask & (1 << i)]
+            for j in chosen:
+                if j.state != REPLAY and (not j.s.enabled or j.d.travel_min == j.d.travel_max):
+                    self._refuse(f"replay refused: joint {j.d.servo_id} is disabled or has no travel in config.h")
+                    return
+            for j in chosen:
+                if j.state != REPLAY:
+                    j.state, j.torque, j.goal, j.fault = REPLAY, True, j.position, 0
+            self.monitor = False
+            text = f"replay: {len(chosen)} joint(s) armed, moving to the first frame"
+            self._emit(EventCode.ARMED, 0, (len(chosen),), text)
+            self._result.events.append(self._replay_event(ReplayPhase.APPROACH, "approaching the first frame"))
+        elif action == "go":
+            if self.replay_phase != ReplayPhase.READY:
+                self._refuse("replay go refused: not ready (the joints are not at the first frame yet)")
+                return
+            self._replay_starve_t = None
+            self._result.events.append(self._replay_event(ReplayPhase.PLAYING, "playing"))
+        elif action == "stop":
+            if self.replay_phase == ReplayPhase.IDLE:
+                self._refuse("no replay to stop")
+                return
+            self._result.events.append(self._replay_event(ReplayPhase.HOLDING, "stopped, holding"))
+        else:
+            raise _ParseError("usage: replay begin|start|go|stop")
 
     # ---- commands ---------------------------------------------------------------------
 
@@ -494,6 +627,9 @@ class HandModel:
         return j
 
     def _cmd_arm(self, args: list[str]) -> None:
+        if self.replay_phase != ReplayPhase.IDLE:
+            self._refuse("refused while a replay is set up (`disarm` ends it)")
+            return
         if any(j.state == SWEEP for j in self.joints):
             self._refuse("refused while a sweep is running (`disarm` or `x` stops it)")
             return

@@ -27,6 +27,8 @@ from ..protocol.messages import (
     Log,
     LogSource,
     MsgType,
+    ReplayChunk,
+    ReplayPhase,
     TelemConfig,
 )
 from .model import HandModel
@@ -51,6 +53,7 @@ class FakeDevice:
         self._last_rx = 0.0
         self._closed = threading.Event()
         self.estops = 0
+        self._last_replay_phase = ReplayPhase.IDLE
         self._send_text("[boot] encoders responding: 9 / 9 (simulated)\n")
         self._send_text("Teleoperation M2 ready. Type `help`.\n")
         self._thread: threading.Thread | None = None
@@ -131,6 +134,11 @@ class FakeDevice:
             cycle = self.model.cycle
             if self._config.telemetry_divider and cycle % self._config.telemetry_divider == 0:
                 self._send(MsgType.TELEMETRY, self.model.telemetry(int(now * 1e6)).encode())
+            # REPLAY_STATUS at 20 Hz while a replay is set up, plus the step back to idle.
+            phase = self.model.replay_phase
+            if cycle % 5 == 0 and (phase != ReplayPhase.IDLE or self._last_replay_phase != phase):
+                self._send(MsgType.REPLAY_STATUS, self.model.replay_status().encode())
+                self._last_replay_phase = phase
             if self._config.slow_divider and cycle % self._config.slow_divider == 0:
                 self._send(MsgType.SLOW_STATUS, self.model.slow_status().encode())
             if now - self._last_rx > self._config.heartbeat_timeout_ms / 1000:
@@ -228,6 +236,8 @@ class FakeDevice:
             case MsgType.HOST_EXIT:
                 self._ack(f.seq)
                 self._exit(ByeReason.HOST_EXIT)
+            case MsgType.REPLAY_DATA:
+                self.model.push_replay(ReplayChunk.decode(f.payload))
             case MsgType.COMMAND:
                 self._command(f.seq, f.payload.decode(errors="replace"))
             case _:
