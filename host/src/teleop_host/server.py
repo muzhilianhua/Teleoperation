@@ -120,6 +120,19 @@ def backup_json(b: Backup) -> dict[str, Any]:
     return {"name": b.name, "saved": b.saved, "tag": b.tag, "note": b.note, "hand": b.hand}
 
 
+class WebFiles(StaticFiles):
+    """The built UI. Without Cache-Control a browser may reuse a cached index.html
+    (and with it the old bundle) for hours after an update, so new pages do not
+    appear: index.html is revalidated on every load; the hashed assets never change.
+    """
+
+    async def get_response(self, path: str, scope: Any) -> Any:
+        response = await super().get_response(path, scope)
+        immutable = path.startswith("assets/") and response.status_code == 200
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if immutable else "no-cache"
+        return response
+
+
 class Client:
     def __init__(self, ws: WebSocket) -> None:
         self.ws = ws
@@ -686,7 +699,7 @@ def create_app(
                 device.set_telemetry(int(message.get("telemetry_divider", 1)), int(message.get("slow_divider", 10)))
 
     if static_dir is not None and (static_dir / "index.html").is_file():
-        app.mount("/", StaticFiles(directory=static_dir, html=True), name="web")
+        app.mount("/", WebFiles(directory=static_dir, html=True), name="web")
     else:
 
         @app.get("/", response_class=HTMLResponse)

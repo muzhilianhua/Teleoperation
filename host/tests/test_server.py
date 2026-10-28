@@ -122,3 +122,14 @@ def test_power_summary_and_stream(client: TestClient) -> None:
         assert "trips" in receive_until(ws, "snapshot")["data"]
         power = receive_until(ws, "power")
         assert set(power["data"]) == {"right", "left"}
+
+
+def test_ui_is_revalidated_but_assets_are_cached(tmp_path: Path) -> None:
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<script src=assets/index-abc.js></script>")
+    (tmp_path / "assets" / "index-abc.js").write_text("// built")
+    app = create_app(HandManager(), HandBackups(tmp_path / "calib"), [], static_dir=tmp_path)
+    with TestClient(app) as c:
+        assert c.get("/").headers["cache-control"] == "no-cache"
+        assert c.get("/index.html").headers["cache-control"] == "no-cache"
+        assert "immutable" in c.get("/assets/index-abc.js").headers["cache-control"]
