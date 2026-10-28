@@ -136,6 +136,10 @@ export interface SlowStatus {
   monitor_position: number[];
   joints: SlowJoint[];
   encoders: SlowEncoder[];
+  // Supply window; 0 from firmware that does not send it (fixed 5.5..6.5 V, 200 ms).
+  supply_min_v: number;
+  supply_max_v: number;
+  supply_ms: number;
 }
 
 export interface DeviceEvent {

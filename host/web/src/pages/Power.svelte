@@ -2,6 +2,7 @@
   import { onDestroy } from 'svelte';
   import Plot from '../lib/components/Plot.svelte';
   import type { PowerWindow } from '../lib/protocol';
+  import { LEGACY_SUPPLY } from '../lib/limits';
   import { app, HAND_LABEL, HANDS, type HandId } from '../lib/state.svelte';
   import { fmt } from '../lib/units';
 
@@ -25,13 +26,19 @@
     }
   });
 
-  const SUPPLY_MIN_V = 5.5; // firmware supply window
+  // Each board's supply window (Parameters page), or the old fixed one.
+  const supplyWindow = (hand: HandId) => {
+    const s = app.hands[hand].slow;
+    return s && s.supply_ms > 0 ? { min: s.supply_min_v, max: s.supply_max_v, ms: s.supply_ms } : LEGACY_SUPPLY;
+  };
   const w = (hand: HandId): PowerWindow | undefined => app.power[hand];
   const totalPeak = $derived(HANDS.reduce((a, h) => a + (w(h)?.peak_supply_a ?? 0), 0));
   const budget = (peak: number) => (shared ? totalPeak : peak);
   const level = (peak: number) => (peak > limitA ? 'err' : peak > 0.8 * limitA ? 'warn' : 'ok');
-  const voltClass = (v: number | null | undefined) =>
-    v == null ? '' : v < SUPPLY_MIN_V ? 'err' : v < SUPPLY_MIN_V + 0.2 ? 'warn' : 'ok';
+  const voltClass = (hand: HandId, v: number | null | undefined) => {
+    const min = supplyWindow(hand).min;
+    return v == null ? '' : v < min ? 'err' : v < min + 0.2 ? 'warn' : 'ok';
+  };
 
   // A minute of the 5 Hz power windows, for the charts.
   const HISTORY = 300;
@@ -47,6 +54,8 @@
     add('right.min', w('right')?.min_v);
     add('left.median', w('left')?.now_median_v);
     add('left.min', w('left')?.min_v);
+    add('right.window', app.hands.right.connected ? supplyWindow('right').min : null);
+    add('left.window', app.hands.left.connected ? supplyWindow('left').min : null);
     add('right.supply', w('right')?.peak_supply_a);
     add('left.supply', w('left')?.peak_supply_a);
     add('total', totalPeak);
@@ -62,6 +71,8 @@
     { label: 'R lowest', data: series['right.min'] ?? [] },
     { label: 'L median', data: series['left.median'] ?? [] },
     { label: 'L lowest', data: series['left.min'] ?? [] },
+    { label: 'R trips below', data: series['right.window'] ?? [] },
+    { label: 'L trips below', data: series['left.window'] ?? [] },
   ]);
   const currentSeries = $derived([
     { label: 'R est.', data: series['right.supply'] ?? [] },
@@ -88,11 +99,13 @@
   <div class="cards">
     {#each HANDS as hand (hand)}
       {@const p = w(hand)}
+      {@const win = supplyWindow(hand)}
       <div class="panel card">
         <div class="row head"><h2>{HAND_LABEL[hand]} hand</h2><span class="muted">{p ? `${p.armed} armed` : 'no data'}</span></div>
         <div class="metrics">
-          <div><span class="k">median now</span><span class="num {voltClass(p?.now_median_v)}">{fmt(p?.now_median_v, 2)} V</span></div>
-          <div><span class="k">lowest servo, 1 s</span><span class="num {voltClass(p?.min_v)}">{fmt(p?.min_v, 1)} V{p?.min_v_joint ? ` (j${p.min_v_joint})` : ''}</span></div>
+          <div><span class="k">median now</span><span class="num {voltClass(hand, p?.now_median_v)}">{fmt(p?.now_median_v, 2)} V</span></div>
+          <div><span class="k">supply window</span><span class="num">{fmt(win.min, 2)}–{fmt(win.max, 2)} V, {win.ms} ms</span></div>
+          <div><span class="k">lowest servo, 1 s</span><span class="num {voltClass(hand, p?.min_v)}">{fmt(p?.min_v, 1)} V{p?.min_v_joint ? ` (j${p.min_v_joint})` : ''}</span></div>
           <div><span class="k">est. supply now</span><span class="num">{fmt(p?.now_supply_a, 2)} A</span></div>
           <div><span class="k">est. supply peak, 1 s</span><span class="num {level(budget(p?.peak_supply_a ?? 0))}">{fmt(p?.peak_supply_a, 2)} A</span></div>
           <div><span class="k">phase current peak</span><span class="num">{fmt(p?.peak_phase_a, 1)} A</span></div>
@@ -103,7 +116,7 @@
       <div class="row head"><h2>{shared ? 'Shared supply' : 'Per hand'}</h2></div>
       <div class="bar"><div class="fill {level(totalPeak)}" style:width={`${Math.min(100, (100 * totalPeak) / limitA)}%`}></div></div>
       <p class="num big {level(totalPeak)}">{fmt(totalPeak, 2)} / {fmt(limitA, 1)} A</p>
-      <p class="hint">Peak of both hands' estimate over the last second{shared ? ', against the one supply' : ''}. When it reaches the limit, a constant-current supply lowers its voltage: <code>supply voltage</code> below {SUPPLY_MIN_V} V, then <code>servo voltage error</code>, then <code>comm lost</code>.</p>
+      <p class="hint">Peak of both hands' estimate over the last second{shared ? ', against the one supply' : ''}. When it reaches the limit, a constant-current supply lowers its voltage: <code>supply voltage</code> once the median leaves the hand's supply window, then <code>servo voltage error</code>, then <code>comm lost</code>.</p>
     </div>
   </div>
 
@@ -127,7 +140,7 @@
             <td class="num">{trip.joint || 'all'}</td>
             {#each HANDS as h}
               {@const x = trip.hands[h]}
-              <td class="num {voltClass(x?.min_v)}">{x ? `${fmt(x.min_median_v, 2)} / ${fmt(x.min_v, 1)}${x.min_v_joint ? ` j${x.min_v_joint}` : ''}` : '—'}</td>
+              <td class="num {voltClass(h, x?.min_v)}">{x ? `${fmt(x.min_median_v, 2)} / ${fmt(x.min_v, 1)}${x.min_v_joint ? ` j${x.min_v_joint}` : ''}` : '—'}</td>
               <td class="num">{x ? fmt(x.peak_supply_a, 2) : '—'}</td>
             {/each}
           </tr>

@@ -80,8 +80,15 @@ def _order(item: tuple[str, str]) -> tuple[int, str]:
     return (int(item[0]) if item[0].isdigit() else 999, item[1])
 
 
+# Global settings that older dumps lack; their `defaults` line sets these values.
+ADDED_GLOBALS = {"supplymin": "5.5", "supplymax": "6.5", "supplyms": "200"}
+
+
 def diff(current: list[str], wanted: list[str]) -> list[Change]:
     a, b = settings_of(current), settings_of(wanted)
+    for settings in (a, b):
+        for key, value in ADDED_GLOBALS.items():
+            settings.setdefault(("global", key), value)
     return [Change(k[0], k[1], a.get(k), b.get(k)) for k in sorted(set(a) | set(b), key=_order) if a.get(k) != b.get(k)]
 
 

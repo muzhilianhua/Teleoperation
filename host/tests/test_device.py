@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,31 @@ async def test_restore_refuses_another_hand_and_stops_at_errors(device) -> None:
     broken = [line.replace("set 2 vmax 1333", "set 2 vmax 99999") for line in dump]
     result = await dev.restore(broken)
     assert not result.ok and "set 2 vmax 99999" in result.message and "load" in result.message
+
+
+async def test_supply_window_setting_and_old_backups(device) -> None:
+    dev, fake = device
+    assert (await dev.command("set supplymin 5.0")).ok
+    assert (await dev.command("set supplyms 400")).ok
+    refused = await dev.command("set supplymax 7.5")
+    assert refused.status == "failed" and "supplymax outside" in refused.error
+    for _ in range(100):  # the next SLOW_STATUS carries the window
+        if dev.slow is not None and dev.slow.supply_ms == 400:
+            break
+        await asyncio.sleep(0.02)
+    assert dev.slow is not None and (dev.slow.supply_min_v, dev.slow.supply_max_v) == (5.0, 6.5)
+    dump = await dev.dump()
+    assert "set supplymin 5" in dump and "set supplyms 400" in dump
+
+    # A backup from before the setting: restoring it means the default window, and verifies.
+    old = [line for line in dump if not line.startswith("set supply")]
+    assert [(c.key, c.current, c.wanted) for c in await dev.diff(old)] == [
+        ("supplymin", "5", "5.5"),
+        ("supplyms", "400", "200"),
+    ]
+    result = await dev.restore(old, save=False)
+    assert result.ok, result.message
+    assert fake.model.globals["supply_min_v"] == 5.5
 
 
 def test_backup_parsing_matches_calib_tool_format(tmp_path: Path) -> None:

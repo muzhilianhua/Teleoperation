@@ -159,7 +159,39 @@ class Result:
 DISARMED_VERBS = {"cal", "save", "load", "defaults", "ping", "limits", "sweep"}
 DISARMED_SET_KEYS = {"on", "off", "enc", "exo", "exospan", "servo"}
 JOINT_NUMBER_KEYS = {"vmax", "amax", "vsat", "trk", "grip", "ilimit", "itrip"}
-GLOBAL_KEYS = {"lead": "lead_ms", "mincut": "min_cutoff_hz", "beta": "beta", "jump": "jump_deg", "gripload": "gripload"}
+GLOBAL_KEYS = {
+    "lead": "lead_ms",
+    "mincut": "min_cutoff_hz",
+    "beta": "beta",
+    "jump": "jump_deg",
+    "gripload": "gripload",
+    "supplymin": "supply_min_v",
+    "supplymax": "supply_max_v",
+    "supplyms": "supply_ms",
+}
+DEFAULT_GLOBALS = {
+    "lead_ms": 0.0,
+    "min_cutoff_hz": 1.0,
+    "beta": 0.01,
+    "jump_deg": 25.0,
+    "gripload": 60.0,
+    "supply_min_v": 5.5,
+    "supply_max_v": 6.5,
+    "supply_ms": 200.0,
+}
+
+
+def supply_window_error(g: dict[str, float]) -> str | None:
+    """The firmware's validateGlobal() for the supply window."""
+    if not 4.5 <= g["supply_min_v"] <= 6.0:
+        return "supplymin outside 4.5..6.0 V"
+    if not 6.0 <= g["supply_max_v"] <= 7.4:
+        return "supplymax outside 6.0..7.4 V"
+    if not g["supply_min_v"] < g["supply_max_v"]:
+        return "supplymin must be below supplymax"
+    if not 50 <= g["supply_ms"] <= 1000:
+        return "supplyms outside 50..1000 ms"
+    return None
 
 
 HAND_CODES = {"right": 1, "left": 2}
@@ -172,7 +204,7 @@ class HandModel:
         self.joints = [Joint(d, default_settings(d), position=(d.travel_min + d.travel_max) / 2) for d in self.table]
         for j in self.joints:
             j.goal = j.target = j.position
-        self.globals = {"lead_ms": 0.0, "min_cutoff_hz": 1.0, "beta": 0.01, "jump_deg": 25.0, "gripload": 60.0}
+        self.globals = dict(DEFAULT_GLOBALS)
         self.load_trip = False
         self.monitor = False
         self.hand_fault = 0
@@ -324,6 +356,9 @@ class HandModel:
             jump_deg=g["jump_deg"],
             grip_load_pct=g["gripload"],
             load_trip=int(self.load_trip),
+            supply_min_v=g["supply_min_v"],
+            supply_max_v=g["supply_max_v"],
+            supply_ms=round(g["supply_ms"]),
             cycles=self.cycle,
             overruns=self.overruns,
             last_period_us=10000,
@@ -612,6 +647,9 @@ class HandModel:
             f"set jump {g['jump_deg']:g}",
             f"set gripload {g['gripload']:g}",
             f"set loadtrip {'on' if self.load_trip else 'off'}",
+            f"set supplymin {g['supply_min_v']:g}",
+            f"set supplymax {g['supply_max_v']:g}",
+            f"set supplyms {round(g['supply_ms'])}",
             "# end of dump: run `save` to store it",
         ]
         return "\n".join(out) + "\n"
@@ -787,9 +825,18 @@ class HandModel:
             return
         if len(args) == 2 and args[0] in GLOBAL_KEYS:
             try:
-                self.globals[GLOBAL_KEYS[args[0]]] = float(args[1])
+                value = float(args[1])
             except ValueError as exc:
-                raise _ParseError("usage: set <lead|mincut|beta|jump|gripload> <value>") from exc
+                raise _ParseError(
+                    "usage: set <lead|mincut|beta|jump|gripload|supplymin|supplymax|supplyms> <value>"
+                ) from exc
+            changed = {**self.globals, GLOBAL_KEYS[args[0]]: value}
+            if (error := supply_window_error(changed)) is not None:
+                self._refuse(f"set rejected: {error}")
+                return
+            if args[0] == "supplyms":
+                changed["supply_ms"] = float(round(value))
+            self.globals = changed
             self._global_changed()
             return
         if len(args) < 2 or not args[0].isdigit():
@@ -849,7 +896,8 @@ class HandModel:
             (),
             f"global: lead {g['lead_ms']:.0f} ms, mincut {g['min_cutoff_hz']:.3f} Hz, beta {g['beta']:.4f}, "
             f"jump {g['jump_deg']:.0f} deg, gripload {g['gripload']:.0f} %, "
-            f"loadtrip {'on' if self.load_trip else 'off'}",
+            f"loadtrip {'on' if self.load_trip else 'off'}, "
+            f"supply {g['supply_min_v']:.2f}..{g['supply_max_v']:.2f} V for {g['supply_ms']:.0f} ms",
         )
 
     def _cmd_save(self, args: list[str]) -> None:
@@ -871,7 +919,7 @@ class HandModel:
         for j in self.joints:
             j.s = default_settings(j.d)
             j.tracking = False
-        self.globals = {"lead_ms": 0.0, "min_cutoff_hz": 1.0, "beta": 0.01, "jump_deg": 25.0, "gripload": 60.0}
+        self.globals = dict(DEFAULT_GLOBALS)
         self.load_trip = False
         self._emit(EventCode.DEFAULTS, 0, (), "defaults loaded (not saved; run `save` to keep them)")
 

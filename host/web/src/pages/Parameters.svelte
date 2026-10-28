@@ -83,7 +83,7 @@
       <h2>Global</h2>
       <table class="globals">
         <tbody>
-          {#each GLOBAL_PARAMS as g}
+          {#each GLOBAL_PARAMS.filter((g) => slow.supply_ms > 0 || !g.key.startsWith('supply')) as g}
             <tr>
               <td>{g.label}</td>
               <td><ParamField value={slow[g.field]} min={g.min} max={g.max} step={g.step} apply={(v) => run(`set ${g.key} ${v}`, { quiet: true })} /></td>
@@ -97,6 +97,7 @@
           </tr>
         </tbody>
       </table>
+      <p class="hint">Supply window: the hand is switched off (<code>supply voltage</code>) when the median servo voltage stays outside it for the time set. Widen it only after measuring where the voltage drops; SCS0009 accepts 4–7.4 V.{slow.supply_ms > 0 ? '' : ' This firmware has a fixed 5.5–6.5 V / 200 ms window.'}</p>
     </div>
   {/if}
 </div>
