@@ -235,13 +235,15 @@ class Player:
         if isinstance(message, ReplayStatus):
             with contextlib.suppress(ValueError):
                 plan.phase = ReplayPhase(message.phase)
-            plan.play_index = message.play_index
-            plan.buffered_until = message.buffered_until
-            plan.underruns = message.underruns
+            if plan.phase != ReplayPhase.IDLE:  # back at idle the board has cleared its counters; keep the last ones
+                plan.play_index = message.play_index
+                plan.buffered_until = message.buffered_until
+                plan.underruns = message.underruns
         elif isinstance(message, Event) and message.code == EventCode.REPLAY:  # args: phase, play index, mask
             with contextlib.suppress(ValueError):
                 plan.phase = ReplayPhase(message.args[0])
-                plan.play_index = max(plan.play_index, message.args[1])
+                if plan.phase != ReplayPhase.IDLE:
+                    plan.play_index = max(plan.play_index, message.args[1])
         elif isinstance(message, LinkStatus) and message.state != LinkState.CONNECTED:
             plan.lost = True
 
