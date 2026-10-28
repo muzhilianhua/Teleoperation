@@ -44,7 +44,7 @@ The two hands are independent: a fault, disarm or reset of one never touches the
 
 ## PC GUI (`host/`)
 
-Everything below can also be done from a browser GUI on the debug computer: calibration, telemetry plots, servo setup, parameters, backups, arming and E-stop. Close `pio device monitor` first:
+Everything below can also be done from a browser GUI on the debug computer: calibration, telemetry plots, servo setup, parameters, backups, arming, E-stop, and teach and replay. Close `pio device monitor` first:
 
 ```bash
 cd host && uv sync && uv run teleop-host      # opens http://127.0.0.1:8790
@@ -52,6 +52,23 @@ uv run teleop-host --sim                      # without hardware
 ```
 
 See [host/README.md](host/README.md). The GUI uses the host link protocol ([docs/host-protocol.md](docs/host-protocol.md)) on the same USB port; the text console below stays available whenever the GUI is not connected.
+
+## Teach and replay
+
+The GUI's **Teach** page records the hands while you teleoperate them and plays the motion back, on one hand or on both together.
+
+- **Record**: pick the hands, start, teleoperate as usual, add markers, stop. Every control cycle is saved to `recordings/<date-time>_<name>/`: `meta.json` plus one `right.csv` / `left.csv`, with both hands on one host time axis.
+  - `recordings/` is not in git. Archive the ones to keep, or point `teleop-host --recordings` at another folder.
+- **Replay**:
+  - *Prepare* arms the joints that followed the glove while recording and moves them slowly to the first frame.
+  - *Play* starts every selected hand together, at 0.25 to 1× speed.
+  - The host streams the recorded goals about 1 s ahead into a 256-frame buffer on each board. The board plays them on its own 100 Hz clock, through the rate limiter, the grip limiter and every safety check.
+  - At the end the joints hold the last pose until you disarm them.
+  - E-stop, a fault, or a buffer that stays empty for 0.5 s stops a replay.
+- **Which hand**: a recording replays only on the hand it was recorded on, with the same joint table.
+- **External control** (for example, with a robot arm controller): read the host clock with `GET /api/time`. Then pass a time on that clock as `at` to `POST /api/teach/record/start` or `POST /api/teach/replay/go`. See [host/README.md](host/README.md).
+
+The `replay begin|start|go|stop` commands work only over the host link ([docs/host-protocol.md](docs/host-protocol.md)). In the text console, `replay` prints that it needs the GUI.
 
 ## Build, test, flash
 
@@ -385,6 +402,7 @@ lib/TeleopCore/           pure C++, host-tested:
   grip_limiter              load-adaptive goal lead cap
   speed_sweep               saturation speed measurement
   jump_guard / one_euro / rate_limiter
+  replay_buffer             ring of streamed replay frames
 src/control_task.*        100 Hz loop on core 1: per-joint states, reads, arming, sweep, settings
 src/config_store.*        Preferences (NVS) read/write
 src/console.*             USB console on core 0: text commands, or the framed host link after `host on`
@@ -397,6 +415,7 @@ tools/measure_mapping.py  mapping consistency measurement (host Python)
 tools/calib.py            calibration backup / diff / restore over the text console (the GUI's Config store does the same)
 host/                     PC GUI: teleop-host (Python, FastAPI) + web UI (Svelte), see host/README.md
 calib/                    calibration backups written by tools/calib.py
+recordings/               teach recordings (git-ignored), see Teach and replay
 ```
 
 ## Vendored code
