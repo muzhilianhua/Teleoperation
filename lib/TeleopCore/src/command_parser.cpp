@@ -90,7 +90,10 @@ constexpr KeyName kGlobalKeys[] = {{"lead", SetKey::Lead},
                                     {"mincut", SetKey::MinCutoff},
                                     {"beta", SetKey::Beta},
                                     {"jump", SetKey::Jump},
-                                    {"gripload", SetKey::GripLoad}};
+                                    {"gripload", SetKey::GripLoad},
+                                    {"supplymin", SetKey::SupplyMin},
+                                    {"supplymax", SetKey::SupplyMax},
+                                    {"supplyms", SetKey::SupplyMs}};
 constexpr KeyName kJointNumberKeys[] = {{"vmax", SetKey::VMax},
                                         {"amax", SetKey::AMax},
                                         {"vsat", SetKey::VSat},
@@ -112,7 +115,7 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
   for (const KeyName& k : kGlobalKeys) {
     if (!eq(tk.t[1], k.name)) continue;
     if (tk.n != 3 || !parseFloat(tk.t[2], out.values[0])) {
-      return "usage: set <lead|mincut|beta|jump|gripload> <value>";
+      return "usage: set <lead|mincut|beta|jump|gripload|supplymin|supplymax|supplyms> <value>";
     }
     out.key = k.key;
     out.valueCount = 1;
@@ -177,7 +180,7 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     out.valueCount = 1;
     return nullptr;
   }
-  return "unknown key (on off enc exo exospan servo vmax amax vsat trk grip ilimit itrip | lead mincut beta jump gripload loadtrip)";
+  return "unknown key (on off enc exo exospan servo vmax amax vsat trk grip ilimit itrip | lead mincut beta jump gripload loadtrip supplymin supplymax supplyms)";
 }
 
 struct Simple {
@@ -353,7 +356,8 @@ const char* parseCommand(const char* line, ParsedCommand& out) {
 
 bool isGlobalKey(SetKey key) {
   return key == SetKey::Lead || key == SetKey::MinCutoff || key == SetKey::Beta || key == SetKey::Jump ||
-         key == SetKey::GripLoad || key == SetKey::LoadTrip;
+         key == SetKey::GripLoad || key == SetKey::LoadTrip || key == SetKey::SupplyMin ||
+         key == SetKey::SupplyMax || key == SetKey::SupplyMs;
 }
 
 bool requiresDisarmed(const ParsedCommand& c) {
@@ -398,6 +402,12 @@ const char* applySetting(const ParsedCommand& c, JointSettings* joints, const Jo
       case SetKey::Jump: g.jumpDeg = c.values[0]; break;
       case SetKey::GripLoad: g.gripLoadPct = c.values[0]; break;
       case SetKey::LoadTrip: g.loadTripEnabled = c.values[0] != 0.0f; break;
+      case SetKey::SupplyMin: g.supplyMinV = c.values[0]; break;
+      case SetKey::SupplyMax: g.supplyMaxV = c.values[0]; break;
+      case SetKey::SupplyMs:
+        if (!(c.values[0] >= kMinSupplyMs && c.values[0] <= kMaxSupplyMs)) return "supplyms outside 50..1000 ms";
+        g.supplyMs = static_cast<uint16_t>(c.values[0] + 0.5f);
+        break;
       default: break;
     }
     const char* error = validateGlobal(g);
@@ -463,6 +473,8 @@ size_t formatDump(const JointSettings* joints, const JointDefaults* defaults, ui
   a.add("set lead %g\nset mincut %g\nset beta %g\nset jump %g\nset gripload %g\nset loadtrip %s\n",
         global.leadMs, global.minCutoffHz, global.beta, global.jumpDeg, global.gripLoadPct,
         global.loadTripEnabled ? "on" : "off");
+  a.add("set supplymin %g\nset supplymax %g\nset supplyms %u\n", global.supplyMinV, global.supplyMaxV,
+        global.supplyMs);
   a.add("# end of dump: run `save` to store it\n");
   return a.result();
 }

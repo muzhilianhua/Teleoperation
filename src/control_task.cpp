@@ -80,6 +80,7 @@ void TeleopController::bindJointTable() {
 bool TeleopController::begin() {
   instance_ = this;
   bindJointTable();
+  applySupplyWindow();
   commands_ = xQueueCreate(32, sizeof(QueuedCommand));
   messages_ = xQueueCreate(64, sizeof(hostlink::Event));
   completions_ = xQueueCreate(32, sizeof(Completion));
@@ -213,6 +214,14 @@ void TeleopController::resetChannelRuntime(JointChannel& ch) {
   ch.encBad = 0;
   ch.encFresh = false;
   ch.reportedFault = Fault::None;
+}
+
+void TeleopController::applySupplyWindow() {
+  teleop::SupervisorConfig sc;
+  sc.supplyMinV = global_.supplyMinV;
+  sc.supplyMaxV = global_.supplyMaxV;
+  sc.supplyMs = global_.supplyMs;
+  supplySupervisor_.setConfig(sc);
 }
 
 void TeleopController::applyRuntimeParams(JointChannel& ch) {
@@ -714,6 +723,7 @@ void TeleopController::handleSet(const Command& c) {
     return;
   }
   global_ = global;
+  applySupplyWindow();
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     JointChannel& ch = channels_[i];
     const teleop::JointSettings& next = joints[i];
@@ -728,9 +738,9 @@ void TeleopController::handleSet(const Command& c) {
     applyRuntimeParams(ch);
   }
   if (teleop::isGlobalKey(c.key)) {
-    event({EV::SettingChanged, 0}, "global: lead %.0f ms, mincut %.3f Hz, beta %.4f, jump %.0f deg, gripload %.0f %%, loadtrip %s",
+    event({EV::SettingChanged, 0}, "global: lead %.0f ms, mincut %.3f Hz, beta %.4f, jump %.0f deg, gripload %.0f %%, loadtrip %s, supply %.2f..%.2f V for %u ms",
             global_.leadMs, global_.minCutoffHz, global_.beta, global_.jumpDeg, global_.gripLoadPct,
-            global_.loadTripEnabled ? "on" : "off");
+            global_.loadTripEnabled ? "on" : "off", global_.supplyMinV, global_.supplyMaxV, global_.supplyMs);
   } else if (JointChannel* ch = channelForServo(c.joint)) {
     const teleop::JointSettings& s = ch->settings;
     event({EV::SettingChanged, c.joint}, "joint %u: %s enc %d exo %ld servo %d..%d vmax %u amax %u vsat %u trk %u grip %u", c.joint,
@@ -1092,6 +1102,7 @@ bool TeleopController::loadConfig(bool atBoot) {
     return false;
   }
   global_ = global;
+  applySupplyWindow();
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     channels_[i].settings = joints[i];
     resetChannelRuntime(channels_[i]);
@@ -1111,6 +1122,7 @@ bool TeleopController::loadConfig(bool atBoot) {
 
 void TeleopController::loadDefaults() {
   global_ = config::kGlobalDefaults;
+  applySupplyWindow();
   for (JointChannel& ch : channels_) {
     ch.settings = teleop::defaultSettings(*ch.def);
     resetChannelRuntime(ch);

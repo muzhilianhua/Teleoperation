@@ -260,6 +260,7 @@ class TeleopController {
   void bindJointTable();
   void resetChannelRuntime(JointChannel& ch);
   void applyRuntimeParams(JointChannel& ch);
+  void applySupplyWindow();
   JointChannel* channelForServo(uint8_t servoId);
   uint8_t armedCount() const;
 

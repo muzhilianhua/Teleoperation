@@ -427,6 +427,7 @@ void Console::printHelp() {
       "  set <j> itrip <%>                          HLS over-current trip, % of cap (0 = off; not saved)\n"
       "  set lead|mincut|beta|jump|gripload <v>     global parameters\n"
       "  set loadtrip on|off                        firmware load trips (off: servo overload decides)\n"
+      "  set supplymin|supplymax <V>, supplyms <ms> servo supply window (median voltage; 4.5..6.0 / 6.0..7.4 V, 50..1000 ms)\n"
       "  save | load | defaults | dump              NVS store / reload / reset (RAM) / export\n"
       "  limits check | limits write <j|all>        servo angle-limit registers vs travel (disarmed)\n"
       "  sweep <j> | sweep <j> apply                measure saturation speed, suggest vmax/vsat (disarmed)\n"
@@ -465,6 +466,7 @@ void Console::printStatus() {
   const teleop::GlobalSettings& g = s.global;
   out_.printf("global lead %.0f ms  mincut %.3f Hz  beta %.4f  jump %.0f deg  gripload %.0f %%  loadtrip %s\n",
                 g.leadMs, g.minCutoffHz, g.beta, g.jumpDeg, g.gripLoadPct, g.loadTripEnabled ? "on" : "off");
+  out_.printf("supply window %.2f..%.2f V for %u ms (median servo voltage)\n", g.supplyMinV, g.supplyMaxV, g.supplyMs);
   out_.println("(grip * = finger in contact, lead shrinking to hold the squeeze near gripload)");
 }
 

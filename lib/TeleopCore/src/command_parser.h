@@ -68,6 +68,9 @@ enum class SetKey : uint8_t {
   Jump,       // global
   GripLoad,   // global
   LoadTrip,   // global, values[0] = 1 (on) / 0 (off)
+  SupplyMin,  // global, V
+  SupplyMax,  // global, V
+  SupplyMs,   // global, ms
 };
 
 struct ParsedCommand {

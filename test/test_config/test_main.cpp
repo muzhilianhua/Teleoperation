@@ -49,6 +49,9 @@ void configureSample(JointSettings* joints, GlobalSettings& g) {
   g.jumpDeg = 30.0f;
   g.gripLoadPct = 70.0f;
   g.loadTripEnabled = true;
+  g.supplyMinV = 5.0f;
+  g.supplyMaxV = 7.0f;
+  g.supplyMs = 400;
 }
 
 void assertJointsEqual(const JointSettings& a, const JointSettings& b) {
@@ -135,7 +138,7 @@ void test_blob_round_trip() {
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
   TEST_ASSERT_EQUAL(kBlobSize, packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob)));
-  TEST_ASSERT_EQUAL(258, kBlobSize);
+  TEST_ASSERT_EQUAL(268, kBlobSize);
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
@@ -147,6 +150,82 @@ void test_blob_round_trip() {
   TEST_ASSERT_EQUAL_FLOAT(30.0f, lg.jumpDeg);
   TEST_ASSERT_EQUAL_FLOAT(70.0f, lg.gripLoadPct);
   TEST_ASSERT_TRUE(lg.loadTripEnabled);
+  TEST_ASSERT_EQUAL_FLOAT(5.0f, lg.supplyMinV);
+  TEST_ASSERT_EQUAL_FLOAT(7.0f, lg.supplyMaxV);
+  TEST_ASSERT_EQUAL(400, lg.supplyMs);
+}
+
+// A version 4 blob is version 5 without the supply window and with its own CRC.
+void test_blob_version_4_upgraded() {
+  JointSettings joints[kMaxJoints];
+  GlobalSettings g;
+  configureSample(joints, g);
+  uint8_t blob[kBlobSize];
+  packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob));
+  blob[4] = 4;
+  const uint32_t crc = crc32(blob, kBlobSizeV4 - 4);
+  for (int i = 0; i < 4; ++i) blob[kBlobSizeV4 - 4 + i] = static_cast<uint8_t>(crc >> (8 * i));
+
+  JointSettings loaded[kMaxJoints];
+  GlobalSettings lg;
+  lg.supplyMinV = 4.8f;  // overwritten by the defaults passed in
+  GlobalSettings defaults;
+  TEST_ASSERT_EQUAL(BlobStatus::Upgraded, unpackConfig(blob, kBlobSizeV4, kDefaults, kMaxJoints, kEncoders,
+                                                       defaults, loaded, lg));
+  TEST_ASSERT_TRUE(blobApplied(BlobStatus::Upgraded));
+  for (uint8_t i = 0; i < kMaxJoints; ++i) assertJointsEqual(joints[i], loaded[i]);
+  TEST_ASSERT_EQUAL_FLOAT(70.0f, lg.gripLoadPct);
+  TEST_ASSERT_EQUAL_FLOAT(5.5f, lg.supplyMinV);
+  TEST_ASSERT_EQUAL_FLOAT(6.5f, lg.supplyMaxV);
+  TEST_ASSERT_EQUAL(200, lg.supplyMs);
+  // A version 4 header on a version 5 length is not a valid blob.
+  TEST_ASSERT_EQUAL(BlobStatus::BadSize, unpackConfig(blob, kBlobSize, kDefaults, kMaxJoints, kEncoders, defaults,
+                                                      loaded, lg));
+}
+
+void test_supply_window_rules() {
+  GlobalSettings g;
+  TEST_ASSERT_NULL(validateGlobal(g));
+  g.supplyMinV = 4.5f;
+  g.supplyMaxV = 7.4f;
+  g.supplyMs = 1000;
+  TEST_ASSERT_NULL(validateGlobal(g));
+  g = GlobalSettings();
+  g.supplyMinV = 4.4f;
+  TEST_ASSERT_NOT_NULL(validateGlobal(g));
+  g = GlobalSettings();
+  g.supplyMaxV = 7.5f;
+  TEST_ASSERT_NOT_NULL(validateGlobal(g));
+  g = GlobalSettings();
+  g.supplyMinV = 6.0f;
+  g.supplyMaxV = 6.0f;
+  TEST_ASSERT_NOT_NULL(validateGlobal(g));
+  g = GlobalSettings();
+  g.supplyMs = 40;
+  TEST_ASSERT_NOT_NULL(validateGlobal(g));
+
+  ParsedCommand c;
+  JointSettings joints[kMaxJoints];
+  loadDefaults(joints);
+  g = GlobalSettings();
+  TEST_ASSERT_NULL(parseCommand("set supplymin 5.0", c));
+  TEST_ASSERT_EQUAL(SetKey::SupplyMin, c.key);
+  TEST_ASSERT_TRUE(isGlobalKey(c.key));
+  TEST_ASSERT_FALSE(requiresDisarmed(c));
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL_FLOAT(5.0f, g.supplyMinV);
+  TEST_ASSERT_NULL(parseCommand("set supplymax 7", c));
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL_FLOAT(7.0f, g.supplyMaxV);
+  TEST_ASSERT_NULL(parseCommand("set supplyms 350", c));
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL(350, g.supplyMs);
+  parseCommand("set supplyms 70000", c);  // must not wrap into range as a u16
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set supplymin 3.9", c);
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL_FLOAT(5.0f, g.supplyMinV);  // unchanged on rejection
+  TEST_ASSERT_NOT_NULL(parseCommand("set supplymin", c));
 }
 
 void test_blob_rejects_corruption_without_touching_output() {
@@ -576,6 +655,9 @@ void test_dump_round_trip() {
   TEST_ASSERT_EQUAL_FLOAT(g.jumpDeg, rg.jumpDeg);
   TEST_ASSERT_EQUAL_FLOAT(g.gripLoadPct, rg.gripLoadPct);
   TEST_ASSERT_EQUAL(g.loadTripEnabled, rg.loadTripEnabled);
+  TEST_ASSERT_EQUAL_FLOAT(g.supplyMinV, rg.supplyMinV);
+  TEST_ASSERT_EQUAL_FLOAT(g.supplyMaxV, rg.supplyMaxV);
+  TEST_ASSERT_EQUAL(g.supplyMs, rg.supplyMs);
 }
 
 void test_dump_reports_short_buffer() {
@@ -593,6 +675,8 @@ int main() {
   RUN_TEST(test_validate_rejections);
   RUN_TEST(test_exo_raw_b_wraps);
   RUN_TEST(test_blob_round_trip);
+  RUN_TEST(test_blob_version_4_upgraded);
+  RUN_TEST(test_supply_window_rules);
   RUN_TEST(test_blob_rejects_corruption_without_touching_output);
   RUN_TEST(test_blob_invalid_joint_reset_to_defaults);
   RUN_TEST(test_validate_span_limits);

@@ -67,12 +67,14 @@ const char* blobStatusToString(BlobStatus status) {
     case BlobStatus::BadJointCount: return "joint count mismatch";
     case BlobStatus::InvalidJoint: return "invalid joint settings (or changed servo model) reset to defaults";
     case BlobStatus::InvalidGlobal: return "invalid global settings reset to defaults";
+    case BlobStatus::Upgraded: return "format v4, supply window at its defaults";
   }
   return "?";
 }
 
 bool blobApplied(BlobStatus status) {
-  return status == BlobStatus::Ok || status == BlobStatus::InvalidJoint || status == BlobStatus::InvalidGlobal;
+  return status == BlobStatus::Ok || status == BlobStatus::InvalidJoint || status == BlobStatus::InvalidGlobal ||
+         status == BlobStatus::Upgraded;
 }
 
 uint32_t crc32(const uint8_t* data, size_t length) {
@@ -114,6 +116,9 @@ size_t packConfig(const JointSettings* joints, const JointDefaults* defaults, ui
   w.f32(global.jumpDeg);
   w.f32(global.gripLoadPct);
   w.u8(global.loadTripEnabled ? 1 : 0);
+  w.f32(global.supplyMinV);
+  w.f32(global.supplyMaxV);
+  w.u16(global.supplyMs);
   w.u32(crc32(out, kBlobSize - 4));
   return kBlobSize;
 }
@@ -126,9 +131,9 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, const JointDefaults* d
   Reader r(in);
   if (r.u32() != kBlobMagic) return BlobStatus::BadMagic;
   const uint16_t version = r.u16();
-  if (version >= 1 && version < kBlobVersion) return BlobStatus::Superseded;
-  if (version != kBlobVersion) return BlobStatus::BadVersion;
-  if (length != kBlobSize) return BlobStatus::BadSize;
+  if (version >= 1 && version < 4) return BlobStatus::Superseded;
+  if (version != 4 && version != kBlobVersion) return BlobStatus::BadVersion;
+  if (length != (version == 4 ? kBlobSizeV4 : kBlobSize)) return BlobStatus::BadSize;
   Reader crcReader(in + length - 4);
   if (crcReader.u32() != crc32(in, length - 4)) return BlobStatus::BadCrc;
   r.u8();  // reserved
@@ -159,8 +164,13 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, const JointDefaults* d
   g.jumpDeg = r.f32();
   g.gripLoadPct = r.f32();
   g.loadTripEnabled = r.u8() != 0;
+  if (version == kBlobVersion) {
+    g.supplyMinV = r.f32();
+    g.supplyMaxV = r.f32();
+    g.supplyMs = r.u16();
+  }
 
-  BlobStatus status = BlobStatus::Ok;
+  BlobStatus status = version == kBlobVersion ? BlobStatus::Ok : BlobStatus::Upgraded;
   bool invalidSeen = false;
   for (uint8_t i = 0; i < count; ++i) {
     const bool sameModel = storedModel[i] == static_cast<uint8_t>(defaults[i].model);
@@ -172,7 +182,7 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, const JointDefaults* d
   }
   if (validateGlobal(g) != nullptr) {
     g = globalDefaults;
-    if (status == BlobStatus::Ok) status = BlobStatus::InvalidGlobal;
+    if (status != BlobStatus::InvalidJoint) status = BlobStatus::InvalidGlobal;
   }
 
   for (uint8_t i = 0; i < count; ++i) joints[i] = loaded[i];

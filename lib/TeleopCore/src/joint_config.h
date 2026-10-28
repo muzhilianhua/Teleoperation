@@ -78,7 +78,21 @@ struct GlobalSettings {
   // Firmware load trips (75 % / 0.3 s, 80 % / 0.1 s). Off by default so a
   // grasp can load the servo; the servo's own overload protection then decides.
   bool loadTripEnabled = false;
+  // Servo supply window: the hand is switched off when the median servo
+  // voltage stays outside [supplyMinV, supplyMaxV] for supplyMs.
+  float supplyMinV = 5.5f;
+  float supplyMaxV = 6.5f;
+  uint16_t supplyMs = 200;
 };
+
+// Bounds of the supply window. SCS0009 (spec A/0): input 4-7.4 V, its own
+// under-voltage cut-out below 4 V. HLS3606 limits are not documented here.
+constexpr float kMinSupplyMinV = 4.5f;
+constexpr float kMaxSupplyMinV = 6.0f;
+constexpr float kMinSupplyMaxV = 6.0f;
+constexpr float kMaxSupplyMaxV = 7.4f;
+constexpr uint16_t kMinSupplyMs = 50;
+constexpr uint16_t kMaxSupplyMs = 1000;
 
 JointSettings defaultSettings(const JointDefaults& defaults);
 

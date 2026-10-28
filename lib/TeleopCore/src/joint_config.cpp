@@ -74,6 +74,10 @@ const char* validateGlobal(const GlobalSettings& g) {
   if (!(g.beta >= 0.0f && g.beta <= 10.0f)) return "beta outside 0..10";
   if (!(g.jumpDeg >= 1.0f && g.jumpDeg <= 180.0f)) return "jump outside 1..180 deg";
   if (!(g.gripLoadPct >= 20.0f && g.gripLoadPct <= 95.0f)) return "gripload outside 20..95 %";
+  if (!(g.supplyMinV >= kMinSupplyMinV && g.supplyMinV <= kMaxSupplyMinV)) return "supplymin outside 4.5..6.0 V";
+  if (!(g.supplyMaxV >= kMinSupplyMaxV && g.supplyMaxV <= kMaxSupplyMaxV)) return "supplymax outside 6.0..7.4 V";
+  if (!(g.supplyMinV < g.supplyMaxV)) return "supplymin must be below supplymax";
+  if (g.supplyMs < kMinSupplyMs || g.supplyMs > kMaxSupplyMs) return "supplyms outside 50..1000 ms";
   return nullptr;
 }
 
