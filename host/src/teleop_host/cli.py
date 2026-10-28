@@ -21,6 +21,8 @@ from .hands import HANDS, HandManager
 from .link.discovery import find_esp32s
 from .plugins import builtin_plugins
 from .server import create_app
+from .teach.store import DEFAULT_DIR as RECORDINGS_DIR
+from .teach.store import RecordingStore
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEV_SERVER = "http://localhost:5173"
@@ -38,6 +40,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--sim", action="store_true", help="offer two simulated hands (and connect to them)")
     parser.add_argument("--bind", default="127.0.0.1:8790", help="host:port to serve on (default 127.0.0.1:8790)")
     parser.add_argument("--backups", type=Path, default=DEFAULT_DIR, help=f"backup root (default {DEFAULT_DIR})")
+    parser.add_argument(
+        "--recordings", type=Path, default=RECORDINGS_DIR, help=f"teach recordings (default {RECORDINGS_DIR})"
+    )
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser")
     parser.add_argument("--dev", action="store_true", help=f"open the Vite dev server ({DEV_SERVER}) instead")
     args = parser.parse_args(argv)
@@ -56,6 +61,7 @@ def main(argv: list[str] | None = None) -> None:
         HandManager(),
         HandBackups(args.backups),
         builtin_plugins(),
+        recordings=RecordingStore(args.recordings),
         static_dir=STATIC_DIR,
         sim_factories=sim_factories,
         initial_ports=initial,

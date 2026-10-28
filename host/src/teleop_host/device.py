@@ -31,6 +31,7 @@ from .protocol.messages import (
     HostHello,
     Log,
     MsgType,
+    ReplayChunk,
     SlowStatus,
     TelemConfig,
     Telemetry,
@@ -157,6 +158,16 @@ class Device:
     def set_telemetry(self, telemetry_divider: int, slow_divider: int) -> None:
         if self._link is not None and self._link.connected:
             self._link.send(MsgType.TELEM_CONFIG, TelemConfig(telemetry_divider, slow_divider).encode())
+
+    def send_replay(self, chunk: ReplayChunk) -> bool:
+        """Queues one REPLAY_DATA chunk (no ACK: REPLAY_STATUS reports what was buffered)."""
+        if self._link is None or not self._link.connected:
+            return False
+        try:
+            self._link.send(MsgType.REPLAY_DATA, chunk.encode())
+        except LinkError:
+            return False
+        return True
 
     async def dump(self) -> list[str]:
         result = await self.command("dump")

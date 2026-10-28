@@ -166,6 +166,12 @@ class RecordingStore:
             raise FileNotFoundError(f"no recording {rid!r}")
         shutil.rmtree(folder)
 
+    def csv_path(self, rid: str, hand: str) -> Path:
+        path = self._folder(rid) / f"{hand}.csv"
+        if not path.is_file():
+            raise FileNotFoundError(f"recording {rid!r} has no {hand} hand")
+        return path
+
     def _folder(self, rid: str) -> Path:
         if Path(rid).name != rid or rid in ("", ".", ".."):
             raise ValueError(f"invalid recording id {rid!r}")

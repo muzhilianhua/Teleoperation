@@ -17,6 +17,9 @@ server -> browser
   notice     {data: {text}}: pairing problems (two boards on one hand)
   power      {data: {hand: window}}: voltages and estimated supply current over the last second, POWER_HZ
   trip       {data: record}: a fault switched joints off; both hands' power in the second before
+  teach      {data: {record, replay}}: recorder and player status, TEACH_HZ while either is active
+  teach_event {data: {kind, ...}}: record_started / record_saved / marker / replay_ready / replay_playing /
+             replay_done / replay_stopped / replay_error
   cmd_result reply to a `cmd`
 
 browser -> server
@@ -33,13 +36,14 @@ import contextlib
 import dataclasses
 import logging
 import math
+import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -54,11 +58,15 @@ from .plugins import Plugin
 from .power import PowerMonitor
 from .protocol.frames import UnframedText
 from .protocol.messages import DeviceInfo, Event, Log, SlowStatus, Telemetry, TelemetryJoint
+from .teach.service import Teach
+from .teach.store import RecordingStore
 
 TEL_HZ = 30.0
 SLOW_HZ = 5.0
 PLOT_FLUSH_S = 0.05
 POWER_HZ = 5.0
+TEACH_HZ = 5.0
+PREVIEW_POINTS = 400
 HISTORY_ON_CONNECT = 300
 
 # Plot channels per joint: name -> value from (joint record, deg per encoder count).
@@ -128,10 +136,11 @@ class Client:
 class Hub:
     """Fans both hands' messages out to every connected browser."""
 
-    def __init__(self, hands: HandManager, plugins: list[Plugin], power: PowerMonitor) -> None:
+    def __init__(self, hands: HandManager, plugins: list[Plugin], power: PowerMonitor, teach: Teach) -> None:
         self.hands = hands
         self.plugins = plugins
         self.power = power
+        self.teach = teach
         self.clients: set[Client] = set()
         self._last_tel: dict[str, float] = {}
         self._last_slow: dict[str, float] = {}
@@ -142,6 +151,8 @@ class Hub:
         self.power.on_trip(lambda r: self.broadcast({"type": "trip", "data": to_json(r)}))
         self._tasks.append(asyncio.create_task(self._flush_plots()))
         self._tasks.append(asyncio.create_task(self._send_power()))
+        self._tasks.append(asyncio.create_task(self._send_teach()))
+        self.teach.player.on_event(self.teach_event)
 
     async def stop(self) -> None:
         for task in self._tasks:
@@ -213,6 +224,19 @@ class Hub:
             if self.clients:
                 self.broadcast({"type": "power", "data": to_json(self.power.summary())})
 
+    async def _send_teach(self) -> None:
+        was_active = False
+        while True:
+            await asyncio.sleep(1 / TEACH_HZ)
+            active = self.teach.active
+            if self.clients and (active or was_active):  # and once more after it ends
+                self.broadcast({"type": "teach", "data": to_json(self.teach.status())})
+            was_active = active
+
+    def teach_event(self, kind: str, data: dict[str, Any]) -> None:
+        self.broadcast({"type": "teach_event", "data": {"kind": kind, **to_json(data)}})
+        self.broadcast({"type": "teach", "data": to_json(self.teach.status())})
+
     def subscribe_plot(self, client: Client, keys: list[str]) -> None:
         parsed: dict[str, list[tuple[int, str, str]]] = {}
         for key in keys[:128]:
@@ -272,17 +296,62 @@ class RestoreRequest(BaseModel):
     force: bool = False
 
 
+class RecordStartRequest(BaseModel):
+    hands: list[str]
+    name: str = ""
+    at: float | None = None  # epoch seconds (GET /api/time); None = now
+
+
+class MarkerRequest(BaseModel):
+    label: str = ""
+
+
+class RenameRequest(BaseModel):
+    name: str
+
+
+class ReplayPrepareRequest(BaseModel):
+    id: str
+    hands: list[str] | None = None  # None = every hand in the recording
+    speed: float = 1.0
+    wait: bool = False  # answer once ready (or failed) instead of at once
+    timeout: float = 30.0
+
+
+class ReplayGoRequest(BaseModel):
+    at: float | None = None  # epoch seconds; None = now
+    wait: bool = False  # answer once the replay has ended
+    timeout: float = 3600.0
+
+
+def recording_preview(recording: Any, points: int) -> dict[str, Any]:
+    hands = {}
+    for hand, track in recording.tracks.items():
+        step = max(1, math.ceil(len(track.t) / points))
+        hands[hand] = {
+            "t": track.t[::step],
+            "active": recording.meta.hands[hand].active,
+            "joints": {
+                sid: {name: cols[name][::step] for name in ("goal", "pos", "exo_deg")}
+                for sid, cols in track.joints.items()
+            },
+        }
+    return {"meta": to_json(recording.meta), "hands": hands}
+
+
 def create_app(
     hands: HandManager,
     backups: HandBackups,
     plugins: list[Plugin],
     *,
+    recordings: RecordingStore | None = None,
     static_dir: Path | None = None,
     sim_factories: dict[str, Callable[[], Transport]] | None = None,
     initial_ports: list[str] | None = None,
 ) -> FastAPI:
     power = PowerMonitor(lambda hand: d.info if (d := hands.device(hand)) else None)
-    hub = Hub(hands, plugins, power)
+    teach = Teach(hands, recordings or RecordingStore())
+    hub = Hub(hands, plugins, power, teach)
     sims = sim_factories or {}
 
     def factory_for(port: str) -> Callable[[], Transport]:
@@ -311,6 +380,7 @@ def create_app(
         await hub.stop()
 
     app = FastAPI(title="teleop-host", lifespan=lifespan)
+    app.state.teach = teach
     api = APIRouter(prefix="/api")
 
     def require_hand(hand: str) -> str:
@@ -434,6 +504,126 @@ def create_app(
     def power_state() -> dict[str, Any]:
         return {"hands": to_json(power.summary()), "trips": to_json(list(power.trips))}
 
+    # ---- teach and replay -------------------------------------------------------------
+
+    def teach_error(exc: Exception) -> HTTPException:
+        if isinstance(exc, FileNotFoundError | LookupError):
+            return HTTPException(404, str(exc))
+        if isinstance(exc, ValueError):
+            return HTTPException(400, str(exc))
+        return HTTPException(409, str(exc))
+
+    @api.get("/time")
+    def host_time() -> dict[str, float]:
+        """The host clock that `at` fields refer to: for an external program to schedule against."""
+        return {"time": time.time()}
+
+    @api.get("/teach/status")
+    def teach_status() -> dict[str, Any]:
+        return to_json(teach.status())
+
+    @api.get("/teach/recordings")
+    def recording_list() -> list[dict[str, Any]]:
+        return to_json(teach.store.list())
+
+    @api.get("/teach/recordings/{rid}")
+    def recording_meta(rid: str) -> dict[str, Any]:
+        try:
+            return to_json(teach.store.meta(rid))
+        except (OSError, ValueError) as exc:
+            raise teach_error(exc) from exc
+
+    @api.get("/teach/recordings/{rid}/preview")
+    def recording_preview_route(rid: str, points: int = PREVIEW_POINTS) -> dict[str, Any]:
+        try:
+            return recording_preview(teach.store.load(rid), max(10, min(points, 5000)))
+        except (OSError, ValueError) as exc:
+            raise teach_error(exc) from exc
+
+    @api.get("/teach/recordings/{rid}/{hand}.csv")
+    def recording_csv(rid: str, hand: str) -> FileResponse:
+        try:
+            path = teach.store.csv_path(rid, require_hand(hand))
+        except (OSError, ValueError) as exc:
+            raise teach_error(exc) from exc
+        return FileResponse(path, media_type="text/csv", filename=f"{rid}_{hand}.csv")
+
+    @api.patch("/teach/recordings/{rid}")
+    def recording_rename(rid: str, req: RenameRequest) -> dict[str, Any]:
+        try:
+            return to_json(teach.store.rename(rid, req.name.strip() or "untitled"))
+        except (OSError, ValueError) as exc:
+            raise teach_error(exc) from exc
+
+    @api.delete("/teach/recordings/{rid}")
+    def recording_delete(rid: str) -> dict[str, bool]:
+        if teach.player.active and teach.player.status().recording_id == rid:
+            raise HTTPException(409, "this recording is being replayed")
+        try:
+            teach.store.delete(rid)
+        except (OSError, ValueError) as exc:
+            raise teach_error(exc) from exc
+        return {"ok": True}
+
+    @api.post("/teach/record/start")
+    async def record_start(req: RecordStartRequest) -> dict[str, Any]:
+        try:
+            await teach.recorder.start([require_hand(h) for h in req.hands], req.name.strip(), req.at)
+        except (RuntimeError, ValueError) as exc:
+            raise teach_error(exc) from exc
+        hub.teach_event("record_started", {"hands": req.hands, "name": req.name, "at": req.at})
+        return to_json(teach.status())
+
+    @api.post("/teach/record/marker")
+    def record_marker(req: MarkerRequest) -> dict[str, Any]:
+        try:
+            marker = teach.recorder.marker(req.label.strip())
+        except RuntimeError as exc:
+            raise teach_error(exc) from exc
+        hub.teach_event("marker", {"marker": marker})
+        return to_json(marker)
+
+    @api.post("/teach/record/stop")
+    def record_stop() -> dict[str, Any]:
+        try:
+            meta = teach.recorder.stop()
+        except (RuntimeError, OSError) as exc:
+            raise teach_error(exc) from exc
+        hub.teach_event("record_saved", {"recording": meta})
+        return to_json(meta)
+
+    @api.post("/teach/record/cancel")
+    def record_cancel() -> dict[str, Any]:
+        teach.recorder.cancel()
+        hub.teach_event("record_cancelled", {})
+        return to_json(teach.status())
+
+    @api.post("/teach/replay/prepare")
+    async def replay_prepare(req: ReplayPrepareRequest) -> dict[str, Any]:
+        try:
+            chosen = req.hands or list(teach.store.meta(req.id).hands)
+            teach.player.prepare(req.id, [require_hand(h) for h in chosen], req.speed)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise teach_error(exc) from exc
+        if req.wait:
+            await teach.player.wait(req.timeout)
+        return to_json(teach.player.status())
+
+    @api.post("/teach/replay/go")
+    async def replay_go(req: ReplayGoRequest) -> dict[str, Any]:
+        try:
+            teach.player.go(req.at)
+        except RuntimeError as exc:
+            raise teach_error(exc) from exc
+        if req.wait:
+            await teach.player.wait(req.timeout + max(0.0, (req.at or 0.0) - time.time()))
+        return to_json(teach.player.status())
+
+    @api.post("/teach/replay/stop")
+    async def replay_stop() -> dict[str, Any]:
+        await teach.player.stop()
+        return to_json(teach.player.status())
+
     @api.get("/plugins")
     def plugin_list() -> list[dict[str, str]]:
         return [p.describe() for p in plugins]
@@ -459,6 +649,7 @@ def create_app(
                     "plugins": [p.describe() for p in plugins],
                     "power": to_json(power.summary()),
                     "trips": to_json(list(power.trips)),
+                    "teach": to_json(teach.status()),
                 },
             }
         )
