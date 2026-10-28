@@ -136,6 +136,7 @@ enum HandFlag : uint8_t {
   kHandMonitor = 1u << 1,
   kHandSweepActive = 1u << 2,
   kHandTelemetryDropped = 1u << 3,  // at least one cycle was lost since the previous frame
+  kHandReplay = 1u << 4,            // a replay is set up or playing (REPLAY_STATUS has the details)
 };
 
 struct TelemetryJoint {  // 48 B on the wire

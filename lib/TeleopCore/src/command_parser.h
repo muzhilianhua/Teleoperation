@@ -43,7 +43,10 @@ enum class Verb : uint8_t {
   SweepApply,   // joint
   Home,         // joint: glove held at pose A, fixes a multi-turn joint's turn count
   Host,         // flag = on: switch the console to the framed host link (PC GUI)
+  Replay,       // values[0] = ReplayAction; frames come over the host link
 };
+
+enum class ReplayAction : uint8_t { Begin = 0, Start, Go, Stop };
 
 enum class SetKey : uint8_t {
   None,

@@ -48,6 +48,8 @@ class Console {
   void drainHostEvents();
   void sendTelemetry(const TelemetrySample& sample);
   void sendSlowStatus();
+  void handleReplayData(const uint8_t* payload, size_t length);
+  void sendReplayStatus();
   void sendHello();
   void sendAck(uint16_t seq, hostlink::AckStatus status, const char* text = "");
   void sendDone(uint16_t seq, bool ok);
@@ -73,6 +75,9 @@ class Console {
   uint32_t lastRxMs_ = 0;
   uint32_t lastSlowMs_ = 0;
   uint32_t droppedTx_ = 0;  // optional frames dropped for lack of USB buffer
+  uint32_t lastReplayStatusMs_ = 0;
+  uint8_t lastReplayPhase_ = 0;
+  ReplayChunkItem replayChunk_;
   TelemetrySample sample_;
   hostlink::SlowStatus slow_;
   uint8_t payload_[hostlink::kMaxPayload];

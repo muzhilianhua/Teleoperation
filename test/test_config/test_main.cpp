@@ -394,6 +394,12 @@ void test_parse_basic_commands() {
   TEST_ASSERT_NULL(parseCommand("monitor on", c));
   TEST_ASSERT_EQUAL(Verb::Monitor, c.verb);
   TEST_ASSERT_TRUE(c.flag);
+  TEST_ASSERT_NULL(parseCommand("replay go", c));
+  TEST_ASSERT_EQUAL(Verb::Replay, c.verb);
+  TEST_ASSERT_EQUAL(static_cast<int>(ReplayAction::Go), static_cast<int>(c.values[0]));
+  TEST_ASSERT_FALSE(requiresDisarmed(c));  // the controller checks what replay needs
+  TEST_ASSERT_NOT_NULL(parseCommand("replay", c));
+  TEST_ASSERT_NOT_NULL(parseCommand("replay fast", c));
   TEST_ASSERT_NULL(parseCommand("host on", c));
   TEST_ASSERT_EQUAL(Verb::Host, c.verb);
   TEST_ASSERT_TRUE(c.flag);

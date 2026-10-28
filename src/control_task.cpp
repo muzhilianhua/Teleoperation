@@ -49,6 +49,7 @@ const char* jointStateToString(JointState state) {
     case JointState::Follow: return "FOLLOW";
     case JointState::Hold: return "HOLD";
     case JointState::Sweep: return "SWEEP";
+    case JointState::Replay: return "REPLAY";
   }
   return "?";
 }
@@ -83,7 +84,9 @@ bool TeleopController::begin() {
   messages_ = xQueueCreate(64, sizeof(hostlink::Event));
   completions_ = xQueueCreate(32, sizeof(Completion));
   telemetry_ = xQueueCreate(16, sizeof(TelemetrySample));
-  if (commands_ == nullptr || messages_ == nullptr || completions_ == nullptr || telemetry_ == nullptr) {
+  replayChunks_ = xQueueCreate(16, sizeof(ReplayChunkItem));
+  if (commands_ == nullptr || messages_ == nullptr || completions_ == nullptr || telemetry_ == nullptr ||
+      replayChunks_ == nullptr) {
     return false;
   }
 
@@ -142,6 +145,17 @@ void TeleopController::setTelemetryStream(bool on) {
 
 bool TeleopController::popTelemetry(TelemetrySample& sample, TickType_t wait) {
   return xQueueReceive(telemetry_, &sample, wait) == pdTRUE;
+}
+
+bool TeleopController::postReplayChunk(const ReplayChunkItem& chunk) {
+  return xQueueSend(replayChunks_, &chunk, 0) == pdTRUE;
+}
+
+hostlink::ReplayStatus TeleopController::replayStatus() {
+  portENTER_CRITICAL(&mux_);
+  const hostlink::ReplayStatus status = shared_.replay;
+  portEXIT_CRITICAL(&mux_);
+  return status;
 }
 
 void TeleopController::postEvent(const EventTag& tag, const char* format, va_list args) {
@@ -306,6 +320,8 @@ void TeleopController::cycle() {
   }
 
   readServos(nowMs);
+  drainReplayChunks();
+  stepReplay(nowMs);
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) stepJoint(i, dt, nowMs);
   writeGoals(nowMs);
 }
@@ -509,6 +525,11 @@ void TeleopController::stepJoint(uint8_t index, float dt, uint32_t nowMs) {
       stepSweep(index, nowMs);
       return;
 
+    case JointState::Replay:
+      // stepReplay() set the target; encoder faults do not matter here.
+      ch.goal = ch.limiter.step(dt);
+      break;
+
     case JointState::Align:
       if (encFault) {
         disarmJoint(index, Fault::None, "encoder lost during ALIGN");
@@ -625,6 +646,10 @@ void TeleopController::handleCommand(const Command& c) {
     refuse("refused while a sweep is running (`disarm` or `x` stops it)");
     return;
   }
+  if (replayActive() && (c.verb == Verb::Arm || c.verb == Verb::Sweep)) {
+    refuse("refused while a replay is set up (`disarm` ends it)");
+    return;
+  }
   switch (c.verb) {
     case Verb::Arm:
       if (c.joint == 0) {
@@ -673,6 +698,7 @@ void TeleopController::handleCommand(const Command& c) {
     case Verb::LimitsWrite: handleLimitsWrite(c.joint); break;
     case Verb::Sweep: handleSweep(c.joint); break;
     case Verb::SweepApply: handleSweepApply(c.joint); break;
+    case Verb::Replay: handleReplay(c); break;
     default: break;  // console-only verbs never reach the controller
   }
 }
@@ -1336,6 +1362,188 @@ void TeleopController::torqueOffAll(const char* reason) {
   event({EV::TorqueOff, 0, SV::Warning, {allConfirmed ? 1 : 0}}, "%s: torque off on all servos%s", reason, allConfirmed ? "" : " (NOT CONFIRMED)");
 }
 
+// ---- replay -------------------------------------------------------------------
+//
+// Taught motion streamed from the host: `replay begin` clears the buffer, the
+// host sends frames, `replay start` arms the joints of the stream's mask and
+// moves them to the first frame (APPROACH -> READY), `replay go` plays one
+// frame per cycle through the rate limiter, grip limiter and supervisor, and
+// the last frame (or a dry buffer) is held (HOLDING) until the joints are
+// disarmed. Disarming every replay joint ends the replay.
+
+namespace {
+constexpr uint16_t kReplayStartFrames = 50;  // 0.5 s buffered before arming
+constexpr uint32_t kReplayStarveMs = 500;
+}  // namespace
+
+void TeleopController::setReplayPhase(hostlink::ReplayPhase phase, hostlink::Severity severity, const char* text) {
+  replayPhase_ = phase;
+  event({EV::Replay, 0, severity, {static_cast<int32_t>(phase), static_cast<int32_t>(replay_.playIndex()),
+                                   replay_.mask()}},
+        "replay: %s", text);
+}
+
+bool TeleopController::preflightReplay(uint8_t index, ServoState& st) {
+  // Like preflight(), without the glove: no encoder, exo calibration or homing.
+  JointChannel& ch = channels_[index];
+  const uint8_t id = ch.def->servoId;
+  if (!ch.modelOk) {
+    refuse("replay refused: servo %u model not as in config.h (run `ping`)", id);
+    return false;
+  }
+  if (!teleop::travelDefined(*ch.def) || !ch.settings.enabled) {
+    refuse("replay refused: joint %u is disabled or has no travel in config.h", id);
+    return false;
+  }
+  if (!bus_.readState(id, st)) {
+    refuse("replay refused: no status reply from servo %u", id);
+    return false;
+  }
+  if (st.errorByte != 0 || st.status != 0) {
+    refuse("replay refused: servo %u error byte 0x%02X status 0x%02X", id, st.errorByte, st.status);
+    return false;
+  }
+  if (st.position < ch.def->travelMin || st.position > ch.def->travelMax) {
+    refuse("replay refused: servo %u at %d outside travel [%d, %d]", id, st.position, ch.def->travelMin,
+           ch.def->travelMax);
+    return false;
+  }
+  return true;
+}
+
+void TeleopController::handleReplay(const Command& c) {
+  using P = hostlink::ReplayPhase;
+  const auto action = static_cast<teleop::ReplayAction>(static_cast<uint8_t>(c.values[0]));
+  switch (action) {
+    case teleop::ReplayAction::Begin:
+      for (const JointChannel& ch : channels_) {
+        if (ch.armed() && ch.state != JointState::Replay) {
+          refuse("replay begin refused: joints are armed for teleoperation; disarm first");
+          return;
+        }
+      }
+      replay_.reset();
+      replayUnderruns_ = 0;
+      replayStarving_ = false;
+      // Joints still holding a previous replay stay armed and join the next one.
+      setReplayPhase(P::Loading, SV::Info, "loading");
+      return;
+
+    case teleop::ReplayAction::Start: {
+      if (replayPhase_ != P::Loading) {
+        refuse("replay start refused: run `replay begin` and stream frames first");
+        return;
+      }
+      if (replay_.buffered() < kReplayStartFrames && !replay_.ended()) {
+        refuse("replay start refused: only %u frames buffered", replay_.buffered());
+        return;
+      }
+      const uint16_t mask = replay_.mask();
+      ServoState states[teleop::kMaxJoints];
+      for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+        if (!(mask & (1u << i)) || channels_[i].state == JointState::Replay) continue;
+        if (!preflightReplay(i, states[i])) return;
+      }
+      monitor_ = false;
+      const uint32_t nowMs = millis();
+      uint8_t armed = 0;
+      for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+        if (!(mask & (1u << i))) continue;
+        JointChannel& ch = channels_[i];
+        if (ch.state != JointState::Replay) {
+          const char* problem = armJoint(i, states[i], nowMs);
+          if (problem != nullptr) {
+            cmdFailed_ = true;
+            disarmAll(Fault::None, i, problem);
+            replayPhase_ = P::Idle;
+            return;
+          }
+        }
+        ch.state = JointState::Replay;
+        ch.limiter.setLimits(config::kArmSpeed * ch.scale, ch.settings.amax);
+        ++armed;
+      }
+      lastHandFault_ = Fault::None;
+      event({EV::Armed, 0, SV::Info, {armed}}, "replay: %u joint(s) armed, moving to the first frame", armed);
+      setReplayPhase(P::Approach, SV::Info, "approaching the first frame");
+      return;
+    }
+
+    case teleop::ReplayAction::Go:
+      if (replayPhase_ != P::Ready) {
+        refuse("replay go refused: not ready (the joints are not at the first frame yet)");
+        return;
+      }
+      for (JointChannel& ch : channels_) {
+        if (ch.state == JointState::Replay) ch.limiter.setLimits(ch.settings.vmax, ch.settings.amax);
+      }
+      replayStarving_ = false;
+      setReplayPhase(P::Playing, SV::Info, "playing");
+      return;
+
+    case teleop::ReplayAction::Stop:
+      if (replayPhase_ == P::Idle) {
+        refuse("no replay to stop");
+        return;
+      }
+      setReplayPhase(P::Holding, SV::Info, "stopped, holding");
+      return;
+  }
+}
+
+void TeleopController::drainReplayChunks() {
+  using P = hostlink::ReplayPhase;
+  while (xQueueReceive(replayChunks_, &chunkScratch_, 0) == pdTRUE) {
+    if (replayPhase_ == P::Idle || replayPhase_ == P::Holding) continue;  // nothing is loading
+    const hostlink::ReplayChunk& h = chunkScratch_.header;
+    // Refusals need no reply: REPLAY_STATUS tells the host where to resend from.
+    replay_.push(h.firstIndex, h.jointMask, chunkScratch_.values, h.count, h.flags & hostlink::kReplayEnd);
+  }
+}
+
+void TeleopController::stepReplay(uint32_t nowMs) {
+  using P = hostlink::ReplayPhase;
+  if (replayPhase_ == P::Idle || replayPhase_ == P::Loading) return;
+  bool any = false;
+  for (const JointChannel& ch : channels_) any |= ch.state == JointState::Replay;
+  if (!any) {  // disarmed, E-stop or a fault switched every replay joint off
+    replay_.reset();
+    setReplayPhase(P::Idle, SV::Info, "ended (no joint armed)");
+    return;
+  }
+  const uint16_t mask = replay_.mask();
+  if (replayPhase_ == P::Approach) {
+    if (!replay_.peek(replayFrame_)) return;
+    bool there = true;
+    for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+      JointChannel& ch = channels_[i];
+      if (!(mask & (1u << i)) || ch.state != JointState::Replay) continue;
+      ch.limiter.setTarget(replayFrame_[i]);
+      there &= fabsf(ch.limiter.position() - replayFrame_[i]) <= config::kAlignTolerance * ch.scale;
+    }
+    if (there) setReplayPhase(P::Ready, SV::Info, "ready at the first frame");
+    return;
+  }
+  if (replayPhase_ != P::Playing) return;  // READY / HOLDING keep their targets
+  if (replay_.pop(replayFrame_)) {
+    replayStarving_ = false;
+    for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
+      JointChannel& ch = channels_[i];
+      if ((mask & (1u << i)) && ch.state == JointState::Replay) ch.limiter.setTarget(replayFrame_[i]);
+    }
+    return;
+  }
+  if (replay_.finished()) {
+    setReplayPhase(P::Holding, SV::Info, "finished, holding the last pose");
+  } else if (!replayStarving_) {
+    replayStarving_ = true;
+    replayStarveSinceMs_ = nowMs;
+    ++replayUnderruns_;
+  } else if (nowMs - replayStarveSinceMs_ > kReplayStarveMs) {
+    setReplayPhase(P::Holding, SV::Warning, "buffer ran dry, holding");
+  }
+}
+
 // ---- snapshot -----------------------------------------------------------------
 
 void TeleopController::publish() {
@@ -1362,6 +1570,11 @@ void TeleopController::publish() {
   s.droppedEvents = droppedEvents_;
   s.droppedTelemetry = droppedTelemetry_;
   s.sweepActive = sweepJoint_ >= 0;
+  s.replay.phase = static_cast<uint8_t>(replayPhase_);
+  s.replay.playIndex = replay_.playIndex();
+  s.replay.bufferedUntil = replay_.bufferedUntil();
+  s.replay.underruns = replayUnderruns_;
+  s.replay.jointMask = replay_.mask();
   s.echo = port_.echo();
   s.monitor = monitor_;
   s.global = global_;

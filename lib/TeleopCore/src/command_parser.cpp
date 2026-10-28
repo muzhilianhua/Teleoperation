@@ -299,6 +299,17 @@ const char* parseCommand(const char* line, ParsedCommand& out) {
     out.verb = Verb::Monitor;
     return nullptr;
   }
+  if (eq(cmd, "replay")) {
+    static const char* const kActions[] = {"begin", "start", "go", "stop"};
+    for (uint8_t i = 0; tk.n == 2 && i < 4; ++i) {
+      if (!eq(tk.t[1], kActions[i])) continue;
+      out.verb = Verb::Replay;
+      out.values[0] = i;
+      out.valueCount = 1;
+      return nullptr;
+    }
+    return "usage: replay begin|start|go|stop";
+  }
   if (eq(cmd, "host")) {
     if (tk.n != 2 || !parseOnOff(tk.t[1], out.flag)) return "usage: host on|off";
     out.verb = Verb::Host;

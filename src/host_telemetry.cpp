@@ -19,7 +19,7 @@ static_assert(sizeof(kEventNames) / sizeof(kEventNames[0]) == static_cast<size_t
               "one name per event code");
 
 constexpr uint8_t kFaultCount = static_cast<uint8_t>(teleop::Fault::OverCurrent) + 1;
-constexpr uint8_t kStateCount = static_cast<uint8_t>(JointState::Sweep) + 1;
+constexpr uint8_t kStateCount = static_cast<uint8_t>(JointState::Replay) + 1;
 constexpr uint8_t kModelCount = static_cast<uint8_t>(feetech::ServoModel::Hls3606) + 1;
 
 int16_t toI16(float v) {
@@ -119,6 +119,7 @@ void fillTelemetry(const Snapshot& s, hostlink::Telemetry& out) {
   if (s.torqueOffConfirmed) out.handFlags |= hostlink::kHandTorqueOffConfirmed;
   if (s.monitor) out.handFlags |= hostlink::kHandMonitor;
   if (s.sweepActive) out.handFlags |= hostlink::kHandSweepActive;
+  if (s.replay.phase != static_cast<uint8_t>(hostlink::ReplayPhase::Idle)) out.handFlags |= hostlink::kHandReplay;
   out.execUs = toU16(static_cast<float>(s.timing.lastExecUs));
   out.jointCount = teleop::kMaxJoints;
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {

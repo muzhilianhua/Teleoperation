@@ -21,6 +21,7 @@
 #include <exo_tracker.h>
 #include <one_euro.h>
 #include <rate_limiter.h>
+#include <replay_buffer.h>
 #include <servo_bus.h>
 #include <speed_sweep.h>
 #include <supervisor.h>
@@ -28,7 +29,8 @@
 #include "config.h"
 
 // Sweep: the joint is armed alone and driven by the speed sweep, not the glove.
-enum class JointState : uint8_t { Off, Align, Follow, Hold, Sweep };
+// Replay: armed and driven by taught motion streamed from the host, not the glove.
+enum class JointState : uint8_t { Off, Align, Follow, Hold, Sweep, Replay };
 const char* jointStateToString(JointState state);
 
 using Command = teleop::ParsedCommand;
@@ -38,6 +40,13 @@ using Command = teleop::ParsedCommand;
 struct TelemetrySample {
   uint16_t length;
   uint8_t bytes[hostlink::telemetrySize(hostlink::kMaxJoints)];
+};
+
+// One REPLAY_DATA chunk on its way from the console to the control task.
+struct ReplayChunkItem {
+  static constexpr uint8_t kMaxFrames = 20;
+  hostlink::ReplayChunk header;
+  int16_t values[kMaxFrames * teleop::kMaxJoints];
 };
 
 // Reply to a command posted with a host sequence number: sent after every
@@ -112,6 +121,7 @@ struct Snapshot {
   uint32_t droppedEvents = 0;  // events lost to a full queue
   uint32_t droppedTelemetry = 0;  // per-cycle samples lost to a full queue
   bool sweepActive = false;
+  hostlink::ReplayStatus replay;
   bool echo = false;
   bool monitor = false;
   teleop::GlobalSettings global;
@@ -148,6 +158,10 @@ class TeleopController {
   // Per-cycle telemetry for the host link; off (and the queue empty) by default.
   void setTelemetryStream(bool on);
   bool popTelemetry(TelemetrySample& sample, TickType_t wait);
+  // Replay frames from the host link; false when the queue is full (the host
+  // resends from bufferedUntil).
+  bool postReplayChunk(const ReplayChunkItem& chunk);
+  hostlink::ReplayStatus replayStatus();
 
  private:
   struct QueuedCommand {
@@ -231,6 +245,12 @@ class TeleopController {
   void handleLimitsWrite(uint8_t servoId);
   void handleSweep(uint8_t servoId);
   void handleSweepApply(uint8_t servoId);
+  void handleReplay(const Command& command);
+  bool preflightReplay(uint8_t index, ServoState& state);
+  void drainReplayChunks();
+  void stepReplay(uint32_t nowMs);
+  void setReplayPhase(hostlink::ReplayPhase phase, hostlink::Severity severity, const char* text);
+  bool replayActive() const { return replayPhase_ != hostlink::ReplayPhase::Idle; }
   void stepSweep(uint8_t index, uint32_t nowMs);
   void endSweep(const char* abortReason);
   void reportSweep(uint8_t index);
@@ -291,6 +311,15 @@ class TeleopController {
   JointChannel channels_[teleop::kMaxJoints];
   teleop::GlobalSettings global_;
   teleop::SupplySupervisor supplySupervisor_;
+
+  teleop::ReplayBuffer replay_;
+  hostlink::ReplayPhase replayPhase_ = hostlink::ReplayPhase::Idle;
+  uint32_t replayUnderruns_ = 0;
+  bool replayStarving_ = false;
+  uint32_t replayStarveSinceMs_ = 0;
+  int16_t replayFrame_[teleop::kMaxJoints] = {0};
+  QueueHandle_t replayChunks_ = nullptr;
+  ReplayChunkItem chunkScratch_;
 
   teleop::SpeedSweep sweep_;
   int8_t sweepJoint_ = -1;  // channel index while a sweep runs

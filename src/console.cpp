@@ -108,6 +108,10 @@ void Console::handleLine(const char* line) {
     out_.printf("error: %s\n", error);
     return;
   }
+  if (cmd.verb == Verb::Replay) {
+    out_.println("error: replay needs the host link: frames come from the PC GUI (teleop-host)");
+    return;
+  }
   if (cmd.verb == Verb::Host) {
     if (cmd.flag) {
       enterHostMode();
@@ -201,6 +205,11 @@ void Console::hostStep() {
   }
 
   const uint32_t now = millis();
+  // 20 Hz while a replay is set up or playing, plus the step back to idle.
+  if (now - lastReplayStatusMs_ >= 50) {
+    lastReplayStatusMs_ = now;
+    sendReplayStatus();
+  }
   const uint32_t slowPeriodMs = hostConfig_.slowDivider * (1000 / config::kControlHz);
   if (slowPeriodMs > 0 && now - lastSlowMs_ >= slowPeriodMs) {
     lastSlowMs_ = now;
@@ -246,6 +255,7 @@ void Console::handleFrame(const hostlink::FrameHeader& header, const uint8_t* pa
     }
     case MsgType::GetInfo: sendHello(); return;
     case MsgType::Command: handleHostCommand(header.seq, payload, length); return;
+    case MsgType::ReplayData: handleReplayData(payload, length); return;  // no ACK: REPLAY_STATUS reports
     case MsgType::HostExit:
       sendAck(header.seq, hostlink::AckStatus::Accepted);
       exitHostMode(hostlink::ByeReason::HostExit);
@@ -349,6 +359,25 @@ void Console::sendSlowStatus() {
   slow_.rxMalformed = reader_.stats().malformed + reader_.stats().overflows;
   const size_t n = hostlink::encodeSlowStatus(slow_, payload_, sizeof(payload_));
   sendFrame(MsgType::SlowStatus, txSeq_++, payload_, n, true);
+}
+
+void Console::handleReplayData(const uint8_t* payload, size_t length) {
+  ReplayChunkItem& item = replayChunk_;
+  if (!hostlink::decodeReplayData(payload, length, item.header, item.values, sizeof(item.values) / sizeof(item.values[0])) ||
+      item.header.count > ReplayChunkItem::kMaxFrames) {
+    return;  // malformed or too long for one queue item: the host resends from bufferedUntil
+  }
+  controller_.postReplayChunk(item);
+}
+
+void Console::sendReplayStatus() {
+  const hostlink::ReplayStatus status = controller_.replayStatus();
+  const bool idle = status.phase == static_cast<uint8_t>(hostlink::ReplayPhase::Idle);
+  if (idle && lastReplayPhase_ == status.phase) return;
+  lastReplayPhase_ = status.phase;
+  uint8_t buf[32];
+  const size_t n = hostlink::encodeReplayStatus(status, buf, sizeof(buf));
+  sendFrame(MsgType::ReplayStatus, txSeq_++, buf, n);
 }
 
 void Console::sendHello() {
