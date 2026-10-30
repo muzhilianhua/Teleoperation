@@ -65,6 +65,10 @@ constexpr uint8_t kRegStatusBlock = 40;
 constexpr uint8_t kRegArmInfo = 9;
 constexpr uint8_t kArmInfoLength = 25;
 constexpr uint16_t kHlsMaxGoalCurrent = 2047;  // 6.5 mA units
+// HLS position offset (EEPROM, sign-magnitude, BIT15 = negative): the reading
+// is the raw position plus this. Inside registers 9..33, so ArmInfo has it.
+constexpr uint8_t kRegPositionOffset = 31;
+constexpr int16_t kHlsMaxPositionOffset = 4095;
 
 const ModelInfo& modelInfo(ServoModel model);
 const char* modelName(ServoModel model);
@@ -91,8 +95,9 @@ struct ArmInfo {
   uint16_t protectionCurrent = 0;  // 6.5 mA units
   uint8_t resolution = 0;
   uint8_t mode = 0;
+  int16_t offset = 0;  // register 31; always 0 on the SCS0009 (no such register)
 };
-// HLS registers 9..33 (kArmInfoLength bytes).
+// Registers 9..33 (kArmInfoLength bytes).
 bool decodeArmInfo(ServoModel model, const uint8_t* regs, size_t length, ArmInfo& out);
 
 }  // namespace feetech

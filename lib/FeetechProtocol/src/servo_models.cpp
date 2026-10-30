@@ -106,6 +106,7 @@ bool decodeArmInfo(ServoModel model, const uint8_t* r, size_t length, ArmInfo& o
   out.protectionCurrent = get16(r + 19, e);  // register 28
   out.resolution = r[21];                    // register 30
   out.mode = r[24];                          // register 33
+  out.offset = model == ServoModel::Hls3606 ? signMagnitude(get16(r + 22, e), 15) : 0;  // register 31
   return true;
 }
 

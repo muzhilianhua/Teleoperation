@@ -106,6 +106,12 @@ int16_t signMagnitude(uint16_t raw, uint8_t signBit) {
   return (raw & mask) ? static_cast<int16_t>(-magnitude) : magnitude;
 }
 
+uint16_t encodeSignMagnitude(int16_t value, uint8_t signBit) {
+  const uint16_t mask = static_cast<uint16_t>(1u << signBit);
+  const uint16_t magnitude = static_cast<uint16_t>(value < 0 ? -static_cast<int32_t>(value) : value);
+  return static_cast<uint16_t>((magnitude & (mask - 1u)) | (value < 0 ? mask : 0u));
+}
+
 const char* parseResultToString(ParseResult result) {
   switch (result) {
     case ParseResult::Ok: return "ok";

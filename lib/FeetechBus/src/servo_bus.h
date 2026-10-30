@@ -45,4 +45,7 @@ class ServoBus {
   // implementation unlocks, writes, re-locks and reads back.
   virtual bool readAngleLimits(uint8_t id, int16_t& lo, int16_t& hi) = 0;
   virtual bool writeAngleLimits(uint8_t id, int16_t lo, int16_t hi) = 0;
+  // HLS3606 only: angle limits (0/0 = multi-turn allowed here) and position
+  // offset under one unlock, then verified with readArmInfo.
+  virtual bool writeHlsSetup(uint8_t id, int16_t lo, int16_t hi, int16_t offset) = 0;
 };

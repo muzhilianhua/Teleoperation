@@ -52,6 +52,25 @@ void test_decode_real_hls_arm_info() {
   TEST_ASSERT_EQUAL(800, a.protectionCurrent);  // 5.2 A
   TEST_ASSERT_EQUAL(1, a.resolution);
   TEST_ASSERT_EQUAL(0, a.mode);
+  TEST_ASSERT_EQUAL(0, a.offset);
+}
+
+void test_position_offset_sign_magnitude() {
+  // DEX_hand_software wrote -2202 to servo 4 (position 4250 -> 2048): 0x889A little-endian.
+  uint8_t r[kArmInfoLength];
+  for (size_t i = 0; i < kArmInfoLength; ++i) r[i] = kRealHls[kRegArmInfo + i];
+  put16(r + (kRegPositionOffset - kRegArmInfo), encodeSignMagnitude(-2202, 15), Endian::Little);
+  TEST_ASSERT_EQUAL_HEX8(0x9A, r[22]);
+  TEST_ASSERT_EQUAL_HEX8(0x88, r[23]);
+  ArmInfo a;
+  TEST_ASSERT_TRUE(decodeArmInfo(ServoModel::Hls3606, r, sizeof(r), a));
+  TEST_ASSERT_EQUAL(-2202, a.offset);
+  // The SCS0009 has no offset register: whatever is at 31..32 is ignored.
+  TEST_ASSERT_TRUE(decodeArmInfo(ServoModel::Scs0009, r, sizeof(r), a));
+  TEST_ASSERT_EQUAL(0, a.offset);
+  const int16_t values[] = {0, 1, -1, 2048, -2048, 4095, -4095};
+  for (int16_t v : values) TEST_ASSERT_EQUAL(v, signMagnitude(encodeSignMagnitude(v, 15), 15));
+  TEST_ASSERT_EQUAL_HEX16(0x0000, encodeSignMagnitude(0, 15));
 }
 
 void test_decode_scs_status_big_endian_and_signs() {
@@ -133,6 +152,7 @@ int main() {
   RUN_TEST(test_identify_models);
   RUN_TEST(test_decode_real_hls_status);
   RUN_TEST(test_decode_real_hls_arm_info);
+  RUN_TEST(test_position_offset_sign_magnitude);
   RUN_TEST(test_decode_scs_status_big_endian_and_signs);
   RUN_TEST(test_hls_negative_position_and_speed_units);
   RUN_TEST(test_speed_register_never_zero_and_capped);
