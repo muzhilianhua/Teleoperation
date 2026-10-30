@@ -91,7 +91,10 @@ export interface SlowJoint {
   jump_rejects: number;
   travel_min: number; // this robot's stored travel (JointInfo has config.h's default)
   travel_max: number;
+  offset: number; // stored HLS position offset, OFFSET_UNSET = none stored
 }
+
+export const OFFSET_UNSET = -32768;
 
 export interface SlowEncoder {
   address: number;

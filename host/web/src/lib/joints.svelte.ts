@@ -2,7 +2,7 @@
 // for the selected hand or a given one.
 
 import { app, type HandId } from './state.svelte';
-import type { JointInfo, SlowJoint, TelemetryJoint } from './protocol';
+import { OFFSET_UNSET, type JointInfo, type SlowJoint, type TelemetryJoint } from './protocol';
 
 export interface JointView {
   hand: HandId;
@@ -51,4 +51,11 @@ export function travelDefined(v: JointView): boolean {
 // Margin kept inside a mechanical end: ~15 SCS0009 steps, ~50 HLS3606 steps.
 export function travelMargin(j: JointInfo): number {
   return Math.round(15 * j.step_scale);
+}
+
+// The HLS position offset stored with the travel (`zero <j>`, `set <j> offset`);
+// null when none is stored (then the servo's own offset is not checked).
+export function offsetOf(v: JointView): number | null {
+  const o = v.slow?.offset;
+  return o === undefined || o === OFFSET_UNSET ? null : o;
 }

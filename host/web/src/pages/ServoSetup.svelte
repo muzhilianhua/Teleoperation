@@ -3,7 +3,7 @@
   import ParamField from '../lib/components/ParamField.svelte';
   import { run } from '../lib/commands';
   import { confirm } from '../lib/confirm.svelte';
-  import { jointViews, travelMargin, travelOf, type JointView } from '../lib/joints.svelte';
+  import { jointViews, offsetOf, travelMargin, travelOf, type JointView } from '../lib/joints.svelte';
   import { EventCode, MODEL_HLS, type DeviceEvent } from '../lib/protocol';
   import { app } from '../lib/state.svelte';
   import { fmt, modelShort } from '../lib/units';
@@ -63,6 +63,24 @@
     drafts = { ...drafts, [j.info.servo_id]: { min: j.info.travel_min, max: j.info.travel_max } };
   }
 
+  // ---- zero (HLS position offset)
+  async function zero(j: JointView) {
+    const id = j.info.servo_id;
+    const ok = await confirm({
+      title: `Zero joint ${id} (${j.info.name})?`,
+      body: `Torque off: hold the joint by hand in the middle of its travel. Writes the HLS position offset so this position reads 2048 (now ${livePosition(j) ?? '?'}), and leaves the servo in multi-turn mode (angle limits 0/0) until the limits are written.\nThe stored travel and servo endpoints move with the offset; if the travel would then cross the 4095/0 seam they are cleared and the joint is switched off.\nThen: check or measure the travel → Set → Save → Write limits → power-cycle the servo → Check → calibrate.`,
+      confirmText: 'Zero',
+      danger: true,
+    });
+    if (!ok) return;
+    const r = await run(`zero ${id}`);
+    if (r.ok) {
+      const { [id]: _, ...rest } = drafts;
+      drafts = rest;
+      limitRows = null;
+    }
+  }
+
   // ---- limits
   let limitRows = $state<DeviceEvent[] | null>(null);
   let limitSummary = $state('');
@@ -75,12 +93,20 @@
     const hls = joints.some((j) => j.info.model === MODEL_HLS);
     const ok = await confirm({
       title: `Write angle limits ${target === 'all' ? 'for every joint' : `for joint ${target}`}?`,
-      body: `Writes each joint's stored travel into the servo EEPROM (only where it differs).${hls ? '\nPower-cycle the servos afterwards: HLS3606 limits take effect after a restart.' : ''}`,
+      body: `Writes each joint's stored travel (and, on HLS joints, the stored position offset) into the servo EEPROM (only where it differs).${hls ? '\nPower-cycle the servos afterwards: HLS3606 limits take effect after a restart.' : ''}`,
       confirmText: 'Write',
     });
     if (!ok) return;
     await run(`limits write ${target}`);
     await checkLimits();
+  }
+  async function storeOffset(id: number, offset: number) {
+    const ok = await confirm({
+      title: `Store offset ${offset} for joint ${id}?`,
+      body: `Records the servo's current position offset as the one this robot's travel was measured with. From then on arming and Check refuse a servo holding another offset, and backups carry it.\nOnly if the stored travel was measured with this offset in place. Then Save.`,
+      confirmText: 'Store',
+    });
+    if (ok && (await run(`set ${id} offset ${offset}`)).ok) await checkLimits();
   }
   const limitStatus = (m: number) => (m === 1 ? ['ok', 'ok'] : m === 0 ? ['MISMATCH', 'err'] : m === -1 ? ['no reply', 'warn'] : ['travel undefined', '']);
 
@@ -145,9 +171,9 @@
         <button disabled={armed} onclick={() => run(`monitor ${monitorOn ? 'off' : 'on'}`, { quiet: true })}>Monitor {monitorOn ? 'off' : 'on'}</button>
         <button class="primary" disabled={armed} onclick={() => run('save')}>Save to NVS</button>
       </div>
-      <p class="hint">This robot's mechanical limits, in servo steps. They are stored with the calibration, so a backup carries them to another session or board. To measure: torque off, monitor on, push the finger to each end by hand and press Min / Max (keeps ~15 SCS / ~50 HLS steps inside the end), then Set.</p>
+      <p class="hint">This robot's mechanical limits, in servo steps. They are stored with the calibration, so a backup carries them to another session or board. To measure: torque off, monitor on, push the finger to each end by hand and press Min / Max (keeps ~15 SCS / ~50 HLS steps inside the end), then Set. An HLS travel across the 4095/0 seam: hold the joint mid-travel and Zero it first.</p>
       <table>
-        <thead><tr><th>id</th><th>name</th><th>default (config.h)</th><th>live</th><th>min</th><th></th><th>max</th><th></th><th></th></tr></thead>
+        <thead><tr><th>id</th><th>name</th><th>live</th><th>min</th><th></th><th>max</th><th></th><th></th><th>offset</th></tr></thead>
         <tbody>
           {#each joints as j (j.info.servo_id)}
             {@const d = draftOf(j)}
@@ -155,15 +181,26 @@
             <tr class:dirty={dirty(j)}>
               <td class="num">{j.info.servo_id}</td>
               <td>{j.info.name} <span class="pill">{modelShort(j.info.model)}</span></td>
-              <td class="num muted">{j.info.travel_min}..{j.info.travel_max}</td>
               <td class="num">{pos ?? '—'}</td>
               <td><input id={`travel-min-${j.info.servo_id}`} type="number" value={d.min} min="0" disabled={armed} oninput={(e) => setDraft(j, 'min', Number(e.currentTarget.value))} /></td>
               <td><button class="small" disabled={armed || pos === null} onclick={() => capture(j, 'min')} title="from the live position">Min</button></td>
               <td><input id={`travel-max-${j.info.servo_id}`} type="number" value={d.max} min="0" disabled={armed} oninput={(e) => setDraft(j, 'max', Number(e.currentTarget.value))} /></td>
               <td><button class="small" disabled={armed || pos === null} onclick={() => capture(j, 'max')} title="from the live position">Max</button></td>
-              <td class="row">
-                <button class="small primary" disabled={armed || !dirty(j)} onclick={() => applyTravel(j)}>Set</button>
-                <button class="small ghost" disabled={armed} onclick={() => resetToDefault(j)} title="config.h value">Default</button>
+              <td>
+                <div class="row nowrap">
+                  <button class="small primary" disabled={armed || !dirty(j)} onclick={() => applyTravel(j)}>Set</button>
+                  <button class="small ghost" disabled={armed} onclick={() => resetToDefault(j)} title={`config.h: ${j.info.travel_min}..${j.info.travel_max}`}>Default</button>
+                </div>
+              </td>
+              <td>
+                {#if j.info.model === MODEL_HLS}
+                  <div class="row nowrap">
+                    <span class="num" title="stored HLS position offset">{offsetOf(j) ?? 'none'}</span>
+                    <button class="small" disabled={armed || pos === null} onclick={() => zero(j)} title="joint held mid-travel: make it read 2048">Zero</button>
+                  </div>
+                {:else}
+                  <span class="muted">—</span>
+                {/if}
               </td>
             </tr>
           {/each}
@@ -180,7 +217,7 @@
       </div>
       {#if limitRows}
         <table>
-          <thead><tr><th>id</th><th>name</th><th>servo registers</th><th>travel (stored)</th><th></th><th></th></tr></thead>
+          <thead><tr><th>id</th><th>name</th><th>servo registers</th><th>travel (stored)</th><th>offset servo / stored</th><th></th><th></th></tr></thead>
           <tbody>
             {#each limitRows as e}
               {@const j = byId(e.joint)}
@@ -190,7 +227,20 @@
                 <td>{j?.info.name}</td>
                 <td class="num">{e.args[2] === -1 ? '—' : `${e.args[0]}..${e.args[1]}`}</td>
                 <td class="num">{j ? `${travelOf(j).min}..${travelOf(j).max}` : ''}</td>
-                <td><span class="pill {cls}">{label}{e.args[0] === 0 && e.args[1] === 0 && j?.info.model === MODEL_HLS && e.args[2] === 0 ? ' (HLS factory multi-turn)' : ''}</span></td>
+                <td>
+                  {#if j?.info.model === MODEL_HLS && e.args[2] !== -1}
+                    {@const stored = offsetOf(j)}
+                    <div class="row nowrap">
+                      <span class="num" class:err-text={stored !== null && stored !== e.args[3]}>{e.args[3]} / {stored ?? 'none'}</span>
+                      {#if stored === null}
+                        <button class="small ghost" disabled={armed} onclick={() => storeOffset(e.joint, e.args[3])} title="keep the servo's offset as the one the travel was measured with">Store</button>
+                      {/if}
+                    </div>
+                  {:else}
+                    <span class="muted">—</span>
+                  {/if}
+                </td>
+                <td><span class="pill {cls}">{label}{e.args[0] === 0 && e.args[1] === 0 && j?.info.model === MODEL_HLS && e.args[2] === 0 ? ' (HLS multi-turn)' : ''}</span></td>
                 <td>{#if e.args[2] === 0}<button class="small" disabled={armed} onclick={() => writeLimits(e.joint)}>Write</button>{/if}</td>
               </tr>
             {/each}
@@ -269,7 +319,11 @@
     background: var(--warn-weak);
   }
   td :global(input[type='number']) {
-    width: 80px;
+    width: 72px;
+  }
+  .nowrap {
+    flex-wrap: nowrap;
+    white-space: nowrap;
   }
   .panel {
     display: flex;
@@ -278,5 +332,8 @@
   }
   .hint {
     margin: 0;
+  }
+  .err-text {
+    color: var(--err);
   }
 </style>
