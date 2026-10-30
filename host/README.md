@@ -28,7 +28,7 @@ uv run teleop-host --recordings ~/teach           # where Teach keeps recordings
 | Plots | `plot`/Teleplot. Every control cycle on the device clock, with CSV export |
 | Teach | No console equivalent. Records teleoperation of one or both hands, with markers; lists, previews, renames and deletes recordings; replays one on one or both hands at 0.25 to 1× (see *Teach API*) |
 | Calibration | `monitor`, `set j enc`, `cal j hand a/b`, `cal j a/b`, `home j`, `set j on/off`, `set j exospan/servo`, `save` |
-| Servo setup | `ping`, `limits check`, `limits write`, `sweep j`, `sweep j apply`, `ilimit`/`itrip` with live current |
+| Servo setup | `ping`, `set j travel` (this robot's travel, captured from the live position), `limits check`, `limits write`, `sweep j`, `sweep j apply`, `ilimit`/`itrip` with live current |
 | Parameters | `joints`, every `set` key (per joint and global), `save` |
 | Config store | `save`, `load`, `defaults`, `dump`, and backups / diff / restore. Replaces `tools/calib.py`; uses the same `calib/*.txt` files |
 | Encoders | `enc`, `monitor` |

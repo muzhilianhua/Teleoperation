@@ -81,7 +81,7 @@ cd Nimo_Dexhand/EE/Teleoperation
 
 ## Joints
 
-Joints are addressed by **servo id**. Model, name and travel live in `kJoints` in `include/config.h` and can only be changed there, never from the console.
+Joints are addressed by **servo id**. Model and name live in `kJoints` in `include/config.h` and can only be changed there, never from the console. The travel there is only a default: each robot stores its own (see *Per-robot travel*).
 
 | ID | Model | Name | Travel | Default vmax / vsat (own steps/s) |
 |---|---|---|---|---|
@@ -116,7 +116,7 @@ Old calibrations are discarded at the first boot (`saved for the hand before the
 
 1. **Models.** `ping`: ids 1, 3, 5 report SCS0009, the others HLS3606, no mismatch.
 2. **Travel.** `monitor on`, move each finger by hand to both mechanical ends and note the servo column. An HLS3606 still in factory multi-turn mode may show negative or > 4095 readings; note them anyway.
-3. **`config.h`.** For each joint enter a name and the travel: `min + 15` / `max − 15` for SCS0009, `min + 50` / `max − 50` for HLS3606. Reflash.
+3. **Store the travel.** For each joint `set <j> travel <min> <max>` with `min + 15` / `max − 15` for SCS0009, `min + 50` / `max − 50` for HLS3606 (the GUI's Servo setup → Travel captures both ends with this margin). Names go in `config.h`; a travel entered there becomes the default for robots that have none stored.
 4. **Angle limits.** `limits check`, then `limits write all`. HLS3606 servos are unlocked at register 55, written and locked again. **Power-cycle the servos**, then `limits check`: every joint `ok`.
    - An HLS joint whose travel crosses the encoder zero cannot be expressed by limits: set a position offset with DEX_hand_software's `hls-setup` first (not implemented here).
 5. **Speeds.** `sweep <j>` for each joint, `sweep <j> apply` where a suggestion is printed.
@@ -153,7 +153,19 @@ uv run tools/calib.py restore calib/20261021-143005_woody.txt      # apply, veri
 - `restore` refuses a file whose joint table (`# <id> <name>` lines, i.e. `config.h`) differs from the device's, unless `--force`.
 - It lists the changes and asks first (`-y` skips the question), then applies, dumps again to verify and runs `save`. `--no-save` stops after the verification.
 - Any rejected command (an armed joint, a value out of range) aborts the restore and sends `load`, so RAM falls back to what NVS holds.
+- A backup holds the travel too (`set <j> travel`), so one file per robot carries its mechanical limits. A backup from before NVS v6 has no travel lines: restoring it sets the travel to `config.h`'s.
 - Not stored anywhere by design: the turn count of multi-turn joints. `home <j>` is still needed after every power-up.
+
+### Per-robot travel
+
+Robots of the same design differ in assembly, so each one needs its own mechanical limits. The travel is a stored setting like the calibration: in NVS, in `dump` and in backups. `config.h` only gives the default that `defaults` and a fresh board start from.
+
+1. Disarmed, torque off: GUI Servo setup → **Travel**, monitor on. Push each finger to its ends by hand and press **Min** / **Max** (or note the `monitor` position and type it). **Set** each joint, or `set <j> travel <min> <max>` in the console.
+2. **Save**, then Angle limits → **Write all** (`limits write all`). Power-cycle the HLS3606 servos, then **Check**: every joint `ok`.
+3. Calibrate (servo endpoints must lie inside the new travel; `set <j> servo 0 0` clears one that does not), `save`.
+4. Back up with a tag naming the robot, e.g. `calib/right/<timestamp>_robot2.txt`.
+
+To move a board to another robot: restore that robot's backup (Config store, or `tools/calib.py restore`), then **Write all** and power-cycle the HLS servos, so the servos' own limit registers match the restored travel.
 
 ## Multi-turn joints and homing (`home <j>`)
 
@@ -257,9 +269,10 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 | `set <j> itrip <%>` | HLS over-current trip as % of the cap: 0 = off, 50–100, default 90. Allowed while armed; not saved |
 | `set lead\|mincut\|beta\|jump\|gripload <v>` | Global parameters. Allowed while armed |
 | `set loadtrip on\|off` | Firmware load trips (off = only the servo's overload protection decides) |
+| `set <j> travel <min> <max>` | This robot's mechanical travel in the joint's own steps (0–1023 SCS0009, 0–4095 HLS3606, min < max). `0 0` = not measured: the joint cannot be enabled. Calibrated servo endpoints must lie inside it. Disarmed only; then `limits write`. Stored in NVS |
 | `set supplymin\|supplymax <V>` / `set supplyms <ms>` | Supply window: the hand goes off when the median servo voltage stays outside `supplymin`..`supplymax` for `supplyms`. Defaults 5.5 / 6.5 V, 200 ms; allowed 4.5–6.0 / 6.0–7.4 V (SCS0009 input 4–7.4 V), 50–1000 ms. Stored in NVS. Widen it only after measuring where the voltage drops |
 | `sweep <j>` / `sweep <j> apply` | Measure speed and suggest `vmax`/`vsat` / apply the suggestion. `sweep <j>` is disarmed only |
-| `limits check` / `limits write <j\|all>` | Compare / sync the servos' angle-limit registers with the travel. Writes only differing values; power-cycle HLS servos afterwards. Disarmed only |
+| `limits check` / `limits write <j\|all>` | Compare / sync the servos' angle-limit registers with the stored travel. Writes only differing values; power-cycle HLS servos afterwards. Disarmed only |
 | `save` / `load` / `defaults` / `dump` | Write NVS / reload / reset to defaults in RAM / print as commands |
 | `host on` | Switch the port to the framed host link used by the PC GUI. The GUI sends this itself; a missed heartbeat returns to text. See [docs/host-protocol.md](docs/host-protocol.md) |
 | `plot <j> on` / `plot off` | Teleplot at 50 Hz: `exo_deg exo_filt_deg target goal sent ref grip_lead present load speed_cmd`, plus `temp_c`, and on HLS joints `current_ma supply_est_ma current_pct` |
@@ -303,8 +316,7 @@ The goal is written before torque on, which is safe whether or not an HLS3606 go
 - Torque-off is broadcast to all 9 servos at boot and on E-stop: the servos have no communication watchdog.
 - `save`, `limits` and `sweep` are refused while any joint is armed.
 
-**NVS.** Format version 5 is 268 bytes and holds, per joint, the servo model and `ilimit` besides the M2 fields, and the supply window.
-- Version 4 (258 bytes, before the supply window) loads with the window at its defaults; `save` stores it as version 5.
+**NVS.** Format version 6 is 304 bytes and holds, per joint, the servo model, `ilimit` and the travel besides the M2 fields, and the supply window. Version 4 and 5 blobs still load, with the travel from `config.h` (and, for v4, the default supply window); the next `save` writes v6.
 - Versions 1–3 were saved for the hand before the rebuild (other ids and servos) and are discarded.
 - Missing, corrupt or unknown-version data is rejected, and defaults are used.
 - A joint whose stored model differs from `config.h` is reset to its defaults; the other joints keep their settings.
@@ -397,7 +409,7 @@ lib/FeetechBus/           UART transport, ServoBus interface, FeetechMixedBus (p
 lib/HostLink/             pure C++ host link: COBS framing, CRC16, wire message layouts (host-tested)
 lib/TeleopCore/           pure C++, host-tested:
   joint_map / joint_config  mapping, per-joint settings, validation
-  config_blob               NVS serialization (CRC32, version 4, per-joint model)
+  config_blob               NVS serialization (CRC32, version 6, per-joint model and travel)
   exo_tracker               continuous multi-turn exo position, auto-resolve / homing
   command_parser            console grammar, settings edits, dump format
   supervisor                per-joint checks (incl. HLS over-current), fault scope
