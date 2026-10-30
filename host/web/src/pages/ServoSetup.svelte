@@ -3,7 +3,7 @@
   import ParamField from '../lib/components/ParamField.svelte';
   import { run } from '../lib/commands';
   import { confirm } from '../lib/confirm.svelte';
-  import { jointViews } from '../lib/joints.svelte';
+  import { jointViews, travelMargin, travelOf, type JointView } from '../lib/joints.svelte';
   import { EventCode, MODEL_HLS, type DeviceEvent } from '../lib/protocol';
   import { app } from '../lib/state.svelte';
   import { fmt, modelShort } from '../lib/units';
@@ -19,6 +19,50 @@
     pingRows = r.events.filter((e) => e.code === EventCode.PING_RESULT);
   }
 
+  // ---- travel (this robot's mechanical limits, stored with the calibration)
+  const monitorOn = $derived(app.slow?.monitor === 1);
+  // Draft min / max per servo id while editing; cleared once applied.
+  let drafts = $state<Record<number, { min: number; max: number }>>({});
+  const draftOf = (j: JointView) => drafts[j.info.servo_id] ?? travelOf(j);
+  const dirty = (j: JointView) => {
+    const d = drafts[j.info.servo_id];
+    const t = travelOf(j);
+    return !!d && (d.min !== t.min || d.max !== t.max);
+  };
+  function livePosition(j: JointView): number | null {
+    const s = app.slow;
+    if (s && s.monitor && s.monitor_ok_mask & (1 << j.index)) return s.monitor_position[j.index];
+    return j.tel ? j.tel.position : null;
+  }
+  function setDraft(j: JointView, end: 'min' | 'max', value: number) {
+    drafts = { ...drafts, [j.info.servo_id]: { ...draftOf(j), [end]: Math.round(value) } };
+  }
+  function capture(j: JointView, end: 'min' | 'max') {
+    const pos = livePosition(j);
+    if (pos === null) return;
+    // Keep the margin on the inside of the mechanical end.
+    setDraft(j, end, end === 'min' ? pos + travelMargin(j.info) : pos - travelMargin(j.info));
+  }
+  async function applyTravel(j: JointView) {
+    const d = draftOf(j);
+    const t = travelOf(j);
+    const ok = await confirm({
+      title: `Set the travel of joint ${j.info.servo_id} (${j.info.name})?`,
+      body: `${t.min}..${t.max} → ${d.min}..${d.max} servo steps. Every goal is clamped to this range and \`limits write\` stores it in the servo. Calibrated servo endpoints outside it must be recaptured first.\nThen: Save to keep it, and Write the angle limits${j.info.model === MODEL_HLS ? ' (power-cycle HLS servos afterwards)' : ''}.`,
+      confirmText: 'Set travel',
+      danger: true,
+    });
+    if (!ok) return;
+    const r = await run(`set ${j.info.servo_id} travel ${d.min} ${d.max}`);
+    if (r.ok) {
+      const { [j.info.servo_id]: _, ...rest } = drafts;
+      drafts = rest;
+    }
+  }
+  function resetToDefault(j: JointView) {
+    drafts = { ...drafts, [j.info.servo_id]: { min: j.info.travel_min, max: j.info.travel_max } };
+  }
+
   // ---- limits
   let limitRows = $state<DeviceEvent[] | null>(null);
   let limitSummary = $state('');
@@ -31,7 +75,7 @@
     const hls = joints.some((j) => j.info.model === MODEL_HLS);
     const ok = await confirm({
       title: `Write angle limits ${target === 'all' ? 'for every joint' : `for joint ${target}`}?`,
-      body: `Writes the travel from config.h into the servo EEPROM (only where it differs).${hls ? '\nPower-cycle the servos afterwards: HLS3606 limits take effect after a restart.' : ''}`,
+      body: `Writes each joint's stored travel into the servo EEPROM (only where it differs).${hls ? '\nPower-cycle the servos afterwards: HLS3606 limits take effect after a restart.' : ''}`,
       confirmText: 'Write',
     });
     if (!ok) return;
@@ -97,6 +141,38 @@
 
     <div class="panel">
       <div class="row">
+        <h2>Travel</h2>
+        <button disabled={armed} onclick={() => run(`monitor ${monitorOn ? 'off' : 'on'}`, { quiet: true })}>Monitor {monitorOn ? 'off' : 'on'}</button>
+        <button class="primary" disabled={armed} onclick={() => run('save')}>Save to NVS</button>
+      </div>
+      <p class="hint">This robot's mechanical limits, in servo steps. They are stored with the calibration, so a backup carries them to another session or board. To measure: torque off, monitor on, push the finger to each end by hand and press Min / Max (keeps ~15 SCS / ~50 HLS steps inside the end), then Set.</p>
+      <table>
+        <thead><tr><th>id</th><th>name</th><th>default (config.h)</th><th>live</th><th>min</th><th></th><th>max</th><th></th><th></th></tr></thead>
+        <tbody>
+          {#each joints as j (j.info.servo_id)}
+            {@const d = draftOf(j)}
+            {@const pos = livePosition(j)}
+            <tr class:dirty={dirty(j)}>
+              <td class="num">{j.info.servo_id}</td>
+              <td>{j.info.name} <span class="pill">{modelShort(j.info.model)}</span></td>
+              <td class="num muted">{j.info.travel_min}..{j.info.travel_max}</td>
+              <td class="num">{pos ?? '—'}</td>
+              <td><input id={`travel-min-${j.info.servo_id}`} type="number" value={d.min} min="0" disabled={armed} oninput={(e) => setDraft(j, 'min', Number(e.currentTarget.value))} /></td>
+              <td><button class="small" disabled={armed || pos === null} onclick={() => capture(j, 'min')} title="from the live position">Min</button></td>
+              <td><input id={`travel-max-${j.info.servo_id}`} type="number" value={d.max} min="0" disabled={armed} oninput={(e) => setDraft(j, 'max', Number(e.currentTarget.value))} /></td>
+              <td><button class="small" disabled={armed || pos === null} onclick={() => capture(j, 'max')} title="from the live position">Max</button></td>
+              <td class="row">
+                <button class="small primary" disabled={armed || !dirty(j)} onclick={() => applyTravel(j)}>Set</button>
+                <button class="small ghost" disabled={armed} onclick={() => resetToDefault(j)} title="config.h value">Default</button>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="row">
         <h2>Angle limits</h2>
         <button disabled={armed} onclick={checkLimits}>Check</button>
         <button disabled={armed} onclick={() => writeLimits('all')}>Write all</button>
@@ -104,7 +180,7 @@
       </div>
       {#if limitRows}
         <table>
-          <thead><tr><th>id</th><th>name</th><th>servo registers</th><th>travel (config.h)</th><th></th><th></th></tr></thead>
+          <thead><tr><th>id</th><th>name</th><th>servo registers</th><th>travel (stored)</th><th></th><th></th></tr></thead>
           <tbody>
             {#each limitRows as e}
               {@const j = byId(e.joint)}
@@ -113,7 +189,7 @@
                 <td class="num">{e.joint}</td>
                 <td>{j?.info.name}</td>
                 <td class="num">{e.args[2] === -1 ? '—' : `${e.args[0]}..${e.args[1]}`}</td>
-                <td class="num">{j ? `${j.info.travel_min}..${j.info.travel_max}` : ''}</td>
+                <td class="num">{j ? `${travelOf(j).min}..${travelOf(j).max}` : ''}</td>
                 <td><span class="pill {cls}">{label}{e.args[0] === 0 && e.args[1] === 0 && j?.info.model === MODEL_HLS && e.args[2] === 0 ? ' (HLS factory multi-turn)' : ''}</span></td>
                 <td>{#if e.args[2] === 0}<button class="small" disabled={armed} onclick={() => writeLimits(e.joint)}>Write</button>{/if}</td>
               </tr>
@@ -189,6 +265,12 @@
 </div>
 
 <style>
+  tr.dirty td {
+    background: var(--warn-weak);
+  }
+  td :global(input[type='number']) {
+    width: 80px;
+  }
   .panel {
     display: flex;
     flex-direction: column;

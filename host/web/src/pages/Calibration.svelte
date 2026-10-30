@@ -3,7 +3,7 @@
   import TravelBar from '../lib/components/TravelBar.svelte';
   import { run } from '../lib/commands';
   import { confirm } from '../lib/confirm.svelte';
-  import { jointViews, travelDefined } from '../lib/joints.svelte';
+  import { jointViews, travelDefined, travelOf } from '../lib/joints.svelte';
   import { JointFlag, NO_ENCODER, has } from '../lib/protocol';
   import { app } from '../lib/state.svelte';
   import { DEG_PER_COUNT, fmt, modelShort } from '../lib/units';
@@ -74,7 +74,7 @@
   function readiness(view: (typeof joints)[number]): string {
     const f = view.tel?.flags ?? 0;
     if (has(f, JointFlag.READY)) return 'ready';
-    if (!travelDefined(view.info)) return 'no travel';
+    if (!travelDefined(view)) return 'no travel';
     if (!view.slow || view.slow.encoder_index === NO_ENCODER) return 'no encoder';
     if (view.slow.servo_a === view.slow.servo_b) return 'servo A/B';
     if (!view.slow.exo_b) return 'exo A/B';
@@ -143,10 +143,10 @@
           <div class="step-head"><span class="n">2</span><h2>Servo endpoints</h2>
             <span class="muted">torque off: move the finger by hand</span>
           </div>
-          {#if travelDefined(joint.info)}
-            <TravelBar min={joint.info.travel_min} max={joint.info.travel_max} a={s?.servo_a ?? null} b={s?.servo_b ?? null} present={servoPos} />
+          {#if travelDefined(joint)}
+            <TravelBar min={travelOf(joint).min} max={travelOf(joint).max} a={s?.servo_a ?? null} b={s?.servo_b ?? null} present={servoPos} />
             <div class="row">
-              <span class="muted">travel {joint.info.travel_min}..{joint.info.travel_max} · now</span>
+              <span class="muted">travel {travelOf(joint).min}..{travelOf(joint).max} · now</span>
               <span class="num big">{servoPos ?? '—'}</span>
               <span class="muted">· A</span><span class="num">{s && s.servo_a !== s.servo_b ? s.servo_a : '—'}</span>
               <span class="muted">B</span><span class="num">{s && s.servo_a !== s.servo_b ? s.servo_b : '—'}</span>
@@ -156,7 +156,7 @@
               <button disabled={armed} onclick={() => run(`cal ${id} hand b`)}>Capture B (closed)</button>
             </div>
           {:else}
-            <div class="notice">Travel is not defined in config.h for this joint: measure it with the monitor, enter it, reflash.</div>
+            <div class="notice">This joint's travel is not set: measure and save it in Servo setup → Travel.</div>
           {/if}
         </div>
 

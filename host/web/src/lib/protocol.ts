@@ -89,6 +89,8 @@ export interface SlowJoint {
   detected_model: number;
   effective_current_ma: number;
   jump_rejects: number;
+  travel_min: number; // this robot's stored travel (JointInfo has config.h's default)
+  travel_max: number;
 }
 
 export interface SlowEncoder {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { run } from '../commands';
-  import { faultName, STATE_CLASS, stateName, travelDefined, type JointView } from '../joints.svelte';
+  import { faultName, STATE_CLASS, stateName, travelDefined, travelOf, type JointView } from '../joints.svelte';
   import { JointFlag, has, JointState } from '../protocol';
   import { app } from '../state.svelte';
   import { exoDeg, fmt, modelShort } from '../units';
@@ -38,17 +38,17 @@
     {/if}
   </div>
 
-  {#if travelDefined(joint.info)}
+  {#if travelDefined(joint)}
     <TravelBar
-      min={joint.info.travel_min}
-      max={joint.info.travel_max}
+      min={travelOf(joint).min}
+      max={travelOf(joint).max}
       a={s?.servo_a ?? null}
       b={s?.servo_b ?? null}
       goal={armed ? (t?.sent_goal ?? null) : null}
       present={t?.position ?? null}
     />
   {:else}
-    <div class="hint">travel undefined in config.h</div>
+    <div class="hint">travel not set</div>
   {/if}
 
   <div class="flags">

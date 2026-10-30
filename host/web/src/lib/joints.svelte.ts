@@ -34,6 +34,21 @@ export function faultName(fault: number, hand: HandId = app.current): string {
   return app.hands[hand].info?.faults[fault] ?? `fault ${fault}`;
 }
 
-export function travelDefined(j: JointInfo): boolean {
-  return j.travel_min !== j.travel_max;
+// The robot's stored travel (`set <j> travel`); config.h's default until the
+// first slow status arrives.
+export function travelOf(v: JointView): { min: number; max: number } {
+  // A server or firmware from before the stored travel sends none: show the default.
+  return v.slow && v.slow.travel_min !== undefined
+    ? { min: v.slow.travel_min, max: v.slow.travel_max }
+    : { min: v.info.travel_min, max: v.info.travel_max };
+}
+
+export function travelDefined(v: JointView): boolean {
+  const t = travelOf(v);
+  return t.min < t.max;
+}
+
+// Margin kept inside a mechanical end: ~15 SCS0009 steps, ~50 HLS3606 steps.
+export function travelMargin(j: JointInfo): number {
+  return Math.round(15 * j.step_scale);
 }
