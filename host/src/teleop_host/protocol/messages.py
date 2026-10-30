@@ -31,6 +31,7 @@ __all__ = [
     "HostHello",
     "Log",
     "SlowEncoder",
+    "OFFSET_UNSET",
     "SlowJoint",
     "SlowStatus",
     "TelemConfig",
@@ -418,6 +419,9 @@ class Telemetry:
 # ---- SLOW_STATUS ---------------------------------------------------------------
 
 
+OFFSET_UNSET = -32768  # SlowJoint.offset when no HLS position offset is stored
+
+
 @dataclass(slots=True)
 class SlowJoint:
     enabled: int = 0
@@ -438,8 +442,9 @@ class SlowJoint:
     jump_rejects: int = 0
     travel_min: int = 0  # this robot's stored travel (HELLO has config.h's default)
     travel_max: int = 0
+    offset: int = OFFSET_UNSET  # stored HLS position offset
 
-    _S = struct.Struct("<BBHihhHHHHHHBBHIhh")
+    _S = struct.Struct("<BBHihhHHHHHHBBHIhhh")
 
 
 @dataclass(slots=True)
@@ -555,6 +560,7 @@ class SlowStatus:
                 j.jump_rejects,
                 j.travel_min,
                 j.travel_max,
+                j.offset,
             )
         out += bytes([len(self.encoders)])
         for e in self.encoders:

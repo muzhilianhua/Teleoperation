@@ -330,6 +330,7 @@ hostlink::SlowStatus sampleSlowStatus() {
   j.jumpRejects = 7;
   j.travelMin = 790;
   j.travelMax = 1920;
+  j.offset = -2202;
   s.encoderCount = 1;
   SlowEncoder& e = s.encoders[0];
   e.address = 0x40;
@@ -440,7 +441,7 @@ void test_full_hand_slow_status_size() {
   uint8_t out[1024];
   // 114 B fixed (21 global, 32 timing, 29 bus, 12 encoder pass, 16 link, 4 monitor)
   // + 9 x (2 + 32) monitor positions and joints + 1 + 9 x 11 encoders + 10 supply = 530 B
-  TEST_ASSERT_EQUAL(114 + 9 * 38 + 1 + 9 * 11 + 10, encodeSlowStatus(s, out, sizeof(out)));
+  TEST_ASSERT_EQUAL(114 + 9 * 40 + 1 + 9 * 11 + 10, encodeSlowStatus(s, out, sizeof(out)));
 }
 
 void test_event_golden_vector_and_round_trip() {

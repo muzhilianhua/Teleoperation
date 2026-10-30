@@ -139,7 +139,7 @@ per joint: state u8 | fault u8 | flags u16 | encRaw u16
 
 The control task encodes every cycle into a 16-deep queue without waiting. A slow host loses samples, which sets `handFlags` bit 3; the control loop never slows down.
 
-### SLOW_STATUS (566 B for 9 joints and 9 encoders)
+### SLOW_STATUS (584 B for 9 joints and 9 encoders)
 
 ```
 global:   leadMs f32 | minCutoffHz f32 | beta f32 | jumpDeg f32 | gripLoadPct f32 | loadTrip u8
@@ -153,7 +153,8 @@ monitor:  on u8 | okMask u16 | jointCount u8 | position i16 x jointCount
 joints:   enabled u8 | encoderIndex u8 (0xFF none) | exoRef u16 | exoB i32 | servoA i16 | servoB i16
           vmax u16 | amax u16 | vsat u16 | trk u16 | grip u16 | ilimit u16 | itrip u8
           detectedModel u8 | effectiveCurrentMa u16 | jumpRejects u32
-          travelMin i16 | travelMax i16  (this robot's stored travel)              (36 B each)
+          travelMin i16 | travelMax i16  (this robot's stored travel)
+          offset i16  (stored HLS position offset, −32768 = none stored)         (38 B each)
 encoderCount u8, then per encoder:
           address u8 | state u8 (0 online, 1 no magnet, 2 offline) | valid u8 | angle u16
           agc u8 | magnetOk u8 | errors u32                                       (11 B each)
@@ -176,7 +177,7 @@ The `supply` block (the hand's supply window, `set supplymin|supplymax|supplyms`
 | 7 | cal_captured | id | which (0 exo A, 1 exo B, 2 servo A, 3 servo B), value |
 | 8 | homed | id | position (counts from A) |
 | 9 | ping_result | id | model, firmware major, firmware minor, ok (1 = matches `config.h`) |
-| 10 | limits_row | id | servo lo, servo hi, match (1 ok, 0 mismatch, −1 no reply, −2 travel undefined) |
+| 10 | limits_row | id | servo lo, servo hi, match (1 ok, 0 mismatch of the limits or the stored HLS offset, −1 no reply, −2 travel undefined), servo's HLS position offset (0 on the SCS0009) |
 | 11 | sweep_run | id | command speed, measured speed × 10 (−1 = skipped), reached, max load × 10 |
 | 12 | sweep_done | id | suggested vmax, suggested vsat, applicable, aborted |
 | 13 | config_saved | — | ok |

@@ -211,6 +211,7 @@ void fillSlowStatus(const Snapshot& s, hostlink::SlowStatus& out) {
     w.jumpRejects = j.jumpRejects;
     w.travelMin = st.travelMin;
     w.travelMax = st.travelMax;
+    w.offset = st.offset;
   }
   out.encoderCount = config::kEncoderCount;
   for (uint8_t i = 0; i < config::kEncoderCount; ++i) {

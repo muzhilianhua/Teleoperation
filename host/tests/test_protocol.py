@@ -131,7 +131,7 @@ def sample_slow() -> SlowStatus:
         average_exec_us=850, bus_sent=500, bus_received=498, bus_timeouts=2, bus_last_reply_us=180,
         bus_max_reply_us=950, bus_echo=1, encoder_average_us=1500, encoder_max_us=1700, encoder_max_skew_us=40,
         dropped_events=3, rx_crc_errors=1, rx_malformed=2, monitor=1, monitor_ok_mask=1, monitor_position=[512],
-        joints=[SlowJoint(1, 2, 1000, -8192, 794, 1900, 1333, 26666, 167, 133, 200, 500, 90, 2, 494, 7, 790, 1920)],
+        joints=[SlowJoint(1, 2, 1000, -8192, 794, 1900, 1333, 26666, 167, 133, 200, 500, 90, 2, 494, 7, 790, 1920, -2202)],
         encoders=[SlowEncoder(0x40, 0, 1, 4095, 88, 1, 3)], supply_min_v=5.0, supply_max_v=7.0, supply_ms=400,
     )  # fmt: skip
 
