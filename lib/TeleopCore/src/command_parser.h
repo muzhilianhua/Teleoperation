@@ -44,6 +44,7 @@ enum class Verb : uint8_t {
   Home,         // joint: glove held at pose A, fixes a multi-turn joint's turn count
   Host,         // flag = on: switch the console to the framed host link (PC GUI)
   Replay,       // values[0] = ReplayAction; frames come over the host link
+  Zero,         // joint: HLS3606 position offset so the present position reads 2048
 };
 
 enum class ReplayAction : uint8_t { Begin = 0, Start, Go, Stop };
@@ -56,6 +57,7 @@ enum class SetKey : uint8_t {
   ExoSpan,    // values[0] = raw count at A, values[1] = continuous span to B in counts
   Servo,      // values[0..1] = servo counts at A and B
   Travel,     // values[0..1] = travel min and max, servo counts
+  Offset,     // values[0] = HLS position offset, kOffsetUnset for "none"
   VMax,
   AMax,
   VSat,

@@ -1,5 +1,6 @@
 #include <command_parser.h>
 #include <config_blob.h>
+#include <hls_offset.h>
 #include <joint_config.h>
 #include <string.h>
 #include <unity.h>
@@ -44,6 +45,7 @@ void configureSample(JointSettings* joints, GlobalSettings& g) {
   joints[1].vmax = 500;
   joints[1].trackSteps = 60;
   joints[1].gripSteps = 80;
+  joints[5].offset = -2202;  // HLS joint zeroed by `zero 6`
   g.leadMs = 80.0f;
   g.beta = 0.025f;
   g.jumpDeg = 30.0f;
@@ -57,6 +59,7 @@ void configureSample(JointSettings* joints, GlobalSettings& g) {
 void assertJointsEqual(const JointSettings& a, const JointSettings& b) {
   TEST_ASSERT_EQUAL(a.travelMin, b.travelMin);
   TEST_ASSERT_EQUAL(a.travelMax, b.travelMax);
+  TEST_ASSERT_EQUAL(a.offset, b.offset);
   TEST_ASSERT_EQUAL(a.enabled, b.enabled);
   TEST_ASSERT_EQUAL(a.encoderIndex, b.encoderIndex);
   TEST_ASSERT_EQUAL(a.exoB, b.exoB);
@@ -140,7 +143,7 @@ void test_blob_round_trip() {
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
   TEST_ASSERT_EQUAL(kBlobSize, packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob)));
-  TEST_ASSERT_EQUAL(304, kBlobSize);
+  TEST_ASSERT_EQUAL(322, kBlobSize);
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
@@ -157,8 +160,8 @@ void test_blob_round_trip() {
   TEST_ASSERT_EQUAL(400, lg.supplyMs);
 }
 
-// Older layouts, made from a current blob: drop each joint's travel (v5) and
-// the supply window (v4), then fix the version and CRC.
+// Older layouts, made from a current blob: drop each joint's offset (v6),
+// travel (v5) and the supply window (v4), then fix the version and CRC.
 size_t packOlder(const JointSettings* joints, const GlobalSettings& g, uint16_t version, uint8_t* out) {
   uint8_t current[kBlobSize];
   packConfig(joints, kDefaults, kMaxJoints, g, current, sizeof(current));
@@ -166,8 +169,9 @@ size_t packOlder(const JointSettings* joints, const GlobalSettings& g, uint16_t 
   memcpy(out, current, 8);
   n = 8;
   for (uint8_t i = 0; i < kMaxJoints; ++i) {
-    memcpy(out + n, current + 8 + i * kJointRecordSize, kJointRecordSizeV5);
-    n += kJointRecordSizeV5;
+    const size_t record = version == 6 ? kJointRecordSizeV6 : kJointRecordSizeV5;
+    memcpy(out + n, current + 8 + i * kJointRecordSize, record);
+    n += record;
   }
   const size_t global = version == 4 ? kGlobalRecordSizeV4 : kGlobalRecordSize;
   memcpy(out + n, current + 8 + kMaxJoints * kJointRecordSize, global);
@@ -185,6 +189,7 @@ void test_blob_version_4_upgraded() {
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
   TEST_ASSERT_EQUAL(kBlobSizeV4, packOlder(joints, g, 4, blob));
+  joints[5].offset = kOffsetUnset;  // not in v4
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
@@ -220,6 +225,97 @@ void test_blob_version_5_takes_travel_from_defaults() {
   TEST_ASSERT_EQUAL(kDefaults[2].travelMax, loaded[2].travelMax);
   TEST_ASSERT_EQUAL(joints[0].servoA, loaded[0].servoA);
   TEST_ASSERT_EQUAL_FLOAT(5.0f, lg.supplyMinV);  // v5 has the supply window
+}
+
+// A version 6 blob keeps the travel; no offset is stored.
+void test_blob_version_6_has_no_offset() {
+  JointSettings joints[kMaxJoints];
+  GlobalSettings g;
+  configureSample(joints, g);
+  joints[5].travelMin = 1800;
+  joints[5].travelMax = 3200;
+  uint8_t blob[kBlobSize];
+  TEST_ASSERT_EQUAL(kBlobSizeV6, packOlder(joints, g, 6, blob));
+  TEST_ASSERT_EQUAL(304, kBlobSizeV6);
+  JointSettings loaded[kMaxJoints];
+  GlobalSettings lg;
+  TEST_ASSERT_EQUAL(BlobStatus::Upgraded, unpackConfig(blob, kBlobSizeV6, kDefaults, kMaxJoints, kEncoders,
+                                                       GlobalSettings(), loaded, lg));
+  TEST_ASSERT_EQUAL(1800, loaded[5].travelMin);
+  TEST_ASSERT_EQUAL(3200, loaded[5].travelMax);
+  for (uint8_t i = 0; i < kMaxJoints; ++i) TEST_ASSERT_FALSE(offsetStored(loaded[i]));
+}
+
+void test_offset_setting_rules() {
+  JointSettings joints[kMaxJoints];
+  loadDefaults(joints);
+  GlobalSettings g;
+  ParsedCommand c;
+  TEST_ASSERT_FALSE(offsetStored(joints[1]));  // defaults: none stored
+  TEST_ASSERT_NULL(parseCommand("set 2 offset -2202", c));
+  TEST_ASSERT_EQUAL(SetKey::Offset, c.key);
+  TEST_ASSERT_TRUE(requiresDisarmed(c));
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL(-2202, joints[1].offset);
+  TEST_ASSERT_NULL(parseCommand("set 2 offset none", c));
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_FALSE(offsetStored(joints[1]));
+  TEST_ASSERT_NOT_NULL(parseCommand("set 2 offset 4096", c));
+  TEST_ASSERT_NOT_NULL(parseCommand("set 2 offset", c));
+  parseCommand("set 1 offset 100", c);  // SCS0009: no offset register
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 1 offset none", c);
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+
+  TEST_ASSERT_NULL(parseCommand("zero 6", c));
+  TEST_ASSERT_EQUAL(Verb::Zero, c.verb);
+  TEST_ASSERT_EQUAL(6, c.joint);
+  TEST_ASSERT_TRUE(requiresDisarmed(c));
+  TEST_ASSERT_NOT_NULL(parseCommand("zero", c));
+}
+
+// Bench values from DEX_hand_software hls-setup (data/servo_tuning/changes.jsonl).
+void test_center_offset() {
+  TEST_ASSERT_EQUAL(-2202, centerOffset(0, 4250));  // servo 4: 4250 -> 2048
+  TEST_ASSERT_EQUAL(-150, centerOffset(0, 6294));   // multi-turn reading: folded by one turn
+  TEST_ASSERT_EQUAL(2046, centerOffset(0, 2));
+  TEST_ASSERT_EQUAL(-2202, centerOffset(-2202, 2048));  // already centred: unchanged
+  TEST_ASSERT_EQUAL(-2202 + 300, centerOffset(-2202, 1748));
+  TEST_ASSERT_EQUAL(2202, mirroredOffset(0, -2202));
+  TEST_ASSERT_EQUAL(4095, foldOffset(4095));
+  TEST_ASSERT_EQUAL(4095, foldOffset(4095 + 4096));
+  TEST_ASSERT_EQUAL(-4095, foldOffset(-4095 - 4096));
+}
+
+void test_shift_for_offset() {
+  JointSettings s = defaultSettings(kDefaults[5]);  // HLS, travel 300..2700
+  s.servoA = 2600;
+  s.servoB = 400;
+  TEST_ASSERT_TRUE(shiftForOffset(s, 1000, 4095));
+  TEST_ASSERT_EQUAL(1300, s.travelMin);
+  TEST_ASSERT_EQUAL(3700, s.travelMax);
+  TEST_ASSERT_EQUAL(3600, s.servoA);
+  TEST_ASSERT_EQUAL(1400, s.servoB);
+  // Shifted past the seam as a whole: wraps into one piece again.
+  JointSettings w = defaultSettings(kDefaults[5]);
+  w.travelMin = 3000;
+  w.travelMax = 3500;
+  TEST_ASSERT_TRUE(shiftForOffset(w, 1200, 4095));
+  TEST_ASSERT_EQUAL(104, w.travelMin);
+  TEST_ASSERT_EQUAL(604, w.travelMax);
+  TEST_ASSERT_EQUAL(104, w.servoA);  // uncalibrated endpoints follow the travel
+  TEST_ASSERT_EQUAL(104, w.servoB);
+  // Split by the seam: travel and endpoints cleared, joint disabled.
+  s.enabled = true;
+  TEST_ASSERT_FALSE(shiftForOffset(s, 1000, 4095));  // 2300..4700 would read 2300..604
+  TEST_ASSERT_FALSE(travelDefined(s));
+  TEST_ASSERT_EQUAL(s.servoA, s.servoB);
+  TEST_ASSERT_FALSE(s.enabled);
+  TEST_ASSERT_NULL(validateJoint(s, kDefaults[5], kEncoders));
+  // No travel: nothing to move.
+  JointSettings none = defaultSettings(kDefaults[8]);
+  TEST_ASSERT_TRUE(shiftForOffset(none, 500, 1023));
+  TEST_ASSERT_FALSE(travelDefined(none));
 }
 
 void test_travel_setting_rules() {
@@ -758,6 +854,10 @@ int main() {
   RUN_TEST(test_blob_round_trip);
   RUN_TEST(test_blob_version_4_upgraded);
   RUN_TEST(test_blob_version_5_takes_travel_from_defaults);
+  RUN_TEST(test_blob_version_6_has_no_offset);
+  RUN_TEST(test_offset_setting_rules);
+  RUN_TEST(test_center_offset);
+  RUN_TEST(test_shift_for_offset);
   RUN_TEST(test_travel_setting_rules);
   RUN_TEST(test_supply_window_rules);
   RUN_TEST(test_blob_rejects_corruption_without_touching_output);

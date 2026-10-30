@@ -4,7 +4,9 @@
 // Travel (the mechanical limits) differs from robot to robot with assembly, so
 // it is a setting too: config.h only provides the default, `set <j> travel`
 // changes it (disarmed only, within the servo model's position range), and it
-// is stored, dumped and restored with the rest of the calibration.
+// is stored, dumped and restored with the rest of the calibration. On an
+// HLS3606 the travel is read through the servo's position offset (register 31),
+// so the offset it was measured with is stored with it (`zero <j>` sets it).
 
 #pragma once
 
@@ -20,6 +22,9 @@ constexpr uint8_t kMaxJoints = 9;
 constexpr uint8_t kNoEncoder = 0xFF;
 constexpr int32_t kMinExoSpanCounts = 182;  // 4 deg
 constexpr int32_t kMaxExoSpanCounts = 3 * kEncoderCounts;  // 3 encoder turns
+// JointSettings::offset when none is stored: the servo's offset is then not
+// checked (settings from before it was stored, `defaults`, older backups).
+constexpr int16_t kOffsetUnset = INT16_MIN;
 
 // Every position, speed and step tolerance of a joint is in its servo's own
 // steps (SCS0009 ~0.293 deg, HLS3606 ~0.088 deg per step).
@@ -42,6 +47,9 @@ struct JointSettings {
   // measured yet (monitor only).
   int16_t travelMin = 0;
   int16_t travelMax = 0;
+  // HLS3606 only: the position offset (register 31) the travel and servo
+  // endpoints were measured with; arming refuses a servo holding another one.
+  int16_t offset = kOffsetUnset;
   bool enabled = false;
   uint8_t encoderIndex = kNoEncoder;
   // Operator side: raw encoder count at endpoint A, and endpoint B as the
@@ -112,6 +120,7 @@ inline float scaledSteps(const JointDefaults& d, float scsSteps) { return scsSte
 inline bool travelDefined(const JointDefaults& d) { return d.travelMin < d.travelMax; }
 inline bool travelDefined(const JointSettings& s) { return s.travelMin < s.travelMax; }
 inline bool exoCalibrated(const JointSettings& s) { return s.exoB != 0; }
+inline bool offsetStored(const JointSettings& s) { return s.offset != kOffsetUnset; }
 bool servoCalibrated(const JointSettings& s, const JointDefaults& d);
 bool jointReady(const JointSettings& s, const JointDefaults& d, uint8_t encoderCount);
 

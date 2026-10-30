@@ -155,6 +155,20 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     out.valueCount = 2;
     return nullptr;
   }
+  if (eq(key, "offset")) {
+    out.key = SetKey::Offset;
+    out.valueCount = 1;
+    long offset = 0;
+    if (tk.n == 4 && eq(tk.t[3], "none")) {
+      out.values[0] = kOffsetUnset;
+      return nullptr;
+    }
+    if (tk.n != 4 || !parseInt(tk.t[3], -4095, 4095, offset)) {
+      return "usage: set <joint> offset <-4095..4095|none> (HLS position offset the travel was measured with)";
+    }
+    out.values[0] = static_cast<float>(offset);
+    return nullptr;
+  }
   if (eq(key, "exo") || eq(key, "servo")) {
     const bool exo = eq(key, "exo");
     long a = 0, b = 0;
@@ -191,7 +205,7 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     out.valueCount = 1;
     return nullptr;
   }
-  return "unknown key (on off enc travel exo exospan servo vmax amax vsat trk grip ilimit itrip | lead mincut beta jump gripload loadtrip supplymin supplymax supplyms)";
+  return "unknown key (on off enc travel offset exo exospan servo vmax amax vsat trk grip ilimit itrip | lead mincut beta jump gripload loadtrip supplymin supplymax supplyms)";
 }
 
 struct Simple {
@@ -274,6 +288,15 @@ const char* parseCommand(const char* line, ParsedCommand& out) {
       return nullptr;
     }
     return "usage: home <joint>  (glove held at pose A)";
+  }
+  if (eq(cmd, "zero")) {
+    long joint = 0;
+    if (tk.n == 2 && parseInt(tk.t[1], 1, 253, joint)) {
+      out.verb = Verb::Zero;
+      out.joint = static_cast<uint8_t>(joint);
+      return nullptr;
+    }
+    return "usage: zero <joint>  (HLS3606, torque off, joint held mid-travel)";
   }
   if (eq(cmd, "sweep")) {
     long joint = 0;
@@ -382,13 +405,14 @@ bool requiresDisarmed(const ParsedCommand& c) {
     case Verb::LimitsCheck:  // reads all servos at once: too long for an armed cycle
     case Verb::LimitsWrite:
     case Verb::Sweep:        // drives one joint at full speed: nothing else may be armed
+    case Verb::Zero:         // EEPROM write, and moves the stored positions
       return true;
     case Verb::Monitor:
       return c.flag;
     case Verb::Set:
       return c.key == SetKey::Enable || c.key == SetKey::Encoder || c.key == SetKey::Exo ||
              c.key == SetKey::ExoSpan ||
-             c.key == SetKey::Servo || c.key == SetKey::Travel;
+             c.key == SetKey::Servo || c.key == SetKey::Travel || c.key == SetKey::Offset;
     default:
       return false;
   }
@@ -450,6 +474,7 @@ const char* applySetting(const ParsedCommand& c, JointSettings* joints, const Jo
       s.travelMin = static_cast<int16_t>(v0);
       s.travelMax = static_cast<int16_t>(v1);
       break;
+    case SetKey::Offset: s.offset = static_cast<int16_t>(v0); break;
     case SetKey::VMax: s.vmax = static_cast<uint16_t>(v0); break;
     case SetKey::AMax: s.amax = static_cast<uint16_t>(v0); break;
     case SetKey::VSat: s.vsat = static_cast<uint16_t>(v0); break;
@@ -478,6 +503,7 @@ size_t formatDump(const JointSettings* joints, const JointDefaults* defaults, ui
     } else {
       a.add("set %u enc %u\n", d.servoId, s.encoderIndex);
     }
+    if (offsetStored(s)) a.add("set %u offset %d\n", d.servoId, s.offset);
     // Before `servo`: the endpoints are checked against the travel.
     a.add("set %u travel %d %d\n", d.servoId, s.travelMin, s.travelMax);
     if (exoCalibrated(s)) a.add("set %u exospan %u %ld\n", d.servoId, s.exoRef, static_cast<long>(s.exoB));

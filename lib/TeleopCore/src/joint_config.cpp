@@ -49,6 +49,10 @@ const char* validateJoint(const JointSettings& s, const JointDefaults& d, uint8_
     if (s.travelMin >= s.travelMax) return "travel min must be below max";
   }
   if (!travelDefined(s) && s.enabled) return "travel not defined (`set <j> travel <min> <max>`): joint cannot be enabled";
+  if (offsetStored(s)) {
+    if (d.model != feetech::ServoModel::Hls3606) return "offset applies to HLS3606 joints only";
+    if (abs(s.offset) > feetech::kHlsMaxPositionOffset) return "offset outside -4095..4095";
+  }
   if (s.encoderIndex != kNoEncoder && s.encoderIndex >= encoderCount) return "encoder index out of range";
   if (s.exoRef >= kEncoderCounts) return "exo reference out of range";
   if (s.exoB != 0 && labs(s.exoB) < kMinExoSpanCounts) return "exo span below 4 deg";

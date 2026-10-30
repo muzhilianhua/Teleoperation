@@ -1,17 +1,18 @@
 // Fixed little-endian serialization of all joint and global settings for NVS.
 //
-// Layout (version 6: 9 joints, 304 bytes):
+// Layout (version 7: 9 joints, 322 bytes):
 //   u32 magic 'TELE' | u16 version | u8 reserved (0) | u8 jointCount
 //   jointCount x { u8 enabled, u8 encoder, u8 servo model, u16 exoRef, i32 exoB,
 //                  i16 servoA, i16 servoB, u16 vmax, u16 amax, u16 vsat,
 //                  u16 trackSteps, u16 gripSteps, u16 currentLimitMa,
-//                  i16 travelMin, i16 travelMax }
+//                  i16 travelMin, i16 travelMax, i16 offset }
 //   f32 leadMs | f32 minCutoffHz | f32 beta | f32 jumpDeg | f32 gripLoadPct |
 //   u8 loadTripEnabled | f32 supplyMinV | f32 supplyMaxV | u16 supplyMs
 //   u32 crc32 over everything above
 //
-// Version 5 (268 bytes) is the same without the travel: it loads with each
-// joint's travel from config.h (Upgraded). Version 4 (258 bytes) also lacks the
+// Version 6 (304 bytes) is the same without the offset: it loads with no
+// offset stored (Upgraded). Version 5 (268 bytes) also lacks the travel: it
+// loads with each joint's travel from config.h (Upgraded). Version 4 (258 bytes) also lacks the
 // supply window, which then takes its defaults (Upgraded). Versions 1-3 were saved for the
 // hand before it was rebuilt (other servo ids, joints and models): they are
 // discarded as a whole (Superseded). A joint whose stored servo model differs
@@ -31,13 +32,15 @@
 namespace teleop {
 
 constexpr uint32_t kBlobMagic = 0x454C4554u;  // "TELE"
-constexpr uint16_t kBlobVersion = 6;
+constexpr uint16_t kBlobVersion = 7;
 constexpr size_t kJointRecordSizeV5 = 25;
-constexpr size_t kJointRecordSize = kJointRecordSizeV5 + 4;
+constexpr size_t kJointRecordSizeV6 = kJointRecordSizeV5 + 4;
+constexpr size_t kJointRecordSize = kJointRecordSizeV6 + 2;
 constexpr size_t kGlobalRecordSizeV4 = 21;
 constexpr size_t kGlobalRecordSize = kGlobalRecordSizeV4 + 10;
 constexpr size_t kBlobSizeV4 = 8 + kMaxJoints * kJointRecordSizeV5 + kGlobalRecordSizeV4 + 4;
 constexpr size_t kBlobSizeV5 = 8 + kMaxJoints * kJointRecordSizeV5 + kGlobalRecordSize + 4;
+constexpr size_t kBlobSizeV6 = 8 + kMaxJoints * kJointRecordSizeV6 + kGlobalRecordSize + 4;
 constexpr size_t kBlobSize = 8 + kMaxJoints * kJointRecordSize + kGlobalRecordSize + 4;
 
 enum class BlobStatus : uint8_t {
@@ -50,7 +53,7 @@ enum class BlobStatus : uint8_t {
   BadJointCount,  // nothing applied
   InvalidJoint,   // applied; offending joint(s) (incl. changed servo model) reset to defaults
   InvalidGlobal,  // applied; global settings reset to defaults
-  Upgraded,       // applied; older version: travel (v5) and supply window (v4) from their defaults
+  Upgraded,       // applied; older version: no offset (v6), travel (v5) and supply window (v4) from defaults
 };
 
 const char* blobStatusToString(BlobStatus status);
