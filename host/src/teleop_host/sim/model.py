@@ -33,6 +33,7 @@ DEG_PER_COUNT = 360.0 / ENCODER_COUNTS
 NO_ENCODER = 0xFF
 SCS, HLS = 1, 2
 STEP_SCALE = {SCS: 1.0, HLS: (300.0 / 1024.0) / (360.0 / 4096.0)}
+POSITION_MAX = {SCS: 1023, HLS: 4095}
 MAX_SPEED = {SCS: 1000, HLS: 12492}
 OFF, ALIGN, FOLLOW, HOLD, SWEEP, REPLAY = range(6)
 STATE_NAMES = ["OFF", "ALIGN", "FOLLOW", "HOLD", "SWEEP", "REPLAY"]
@@ -83,6 +84,8 @@ DEFAULT_TABLE = [
 
 @dataclass
 class Settings:
+    travel_min: int = 0  # this robot's travel; defaults come from the joint table
+    travel_max: int = 0
     enabled: bool = False
     encoder: int = NO_ENCODER
     exo_ref: int = 0
@@ -101,6 +104,8 @@ class Settings:
 def default_settings(d: JointDefaults) -> Settings:
     scale = STEP_SCALE[d.model]
     return Settings(
+        travel_min=d.travel_min,
+        travel_max=d.travel_max,
         encoder=d.encoder,
         servo_a=d.travel_min,
         servo_b=d.travel_min,
@@ -157,7 +162,7 @@ class Result:
 
 
 DISARMED_VERBS = {"cal", "save", "load", "defaults", "ping", "limits", "sweep"}
-DISARMED_SET_KEYS = {"on", "off", "enc", "exo", "exospan", "servo"}
+DISARMED_SET_KEYS = {"on", "off", "enc", "exo", "exospan", "servo", "travel"}
 JOINT_NUMBER_KEYS = {"vmax", "amax", "vsat", "trk", "grip", "ilimit", "itrip"}
 GLOBAL_KEYS = {
     "lead": "lead_ms",
@@ -345,6 +350,8 @@ class HandModel:
                 j.d.model,
                 (min(j.s.ilimit, 5200) if j.s.ilimit else 5200) if j.d.model == HLS and j.armed() else 0,
                 0,
+                j.s.travel_min,
+                j.s.travel_max,
             )
             for j in self.joints
         ]
@@ -407,7 +414,7 @@ class HandModel:
                         )
                     )
             elif j.state == SWEEP:
-                j.goal = j.d.travel_min + (j.d.travel_max - j.d.travel_min) * (0.5 + 0.5 * math.sin(4 * self.time))
+                j.goal = j.s.travel_min + (j.s.travel_max - j.s.travel_min) * (0.5 + 0.5 * math.sin(4 * self.time))
                 if self.time >= j.sweep_until:
                     events += self._finish_sweep(j)
             if j.torque:
@@ -529,7 +536,7 @@ class HandModel:
                 return
             chosen = [j for i, j in enumerate(self.joints) if self.replay_mask & (1 << i)]
             for j in chosen:
-                if j.state != REPLAY and (not j.s.enabled or j.d.travel_min == j.d.travel_max):
+                if j.state != REPLAY and (not j.s.enabled or j.s.travel_min >= j.s.travel_max):
                     self._refuse(f"replay refused: joint {j.d.servo_id} is disabled or has no travel in config.h")
                     return
             for j in chosen:
@@ -625,6 +632,7 @@ class HandModel:
             s, i = j.s, j.d.servo_id
             out.append(f"# {i} {j.d.name}")
             out.append(f"set {i} enc {'none' if s.encoder == NO_ENCODER else s.encoder}")
+            out.append(f"set {i} travel {s.travel_min} {s.travel_max}")
             if j.exo_calibrated():
                 out.append(f"set {i} exospan {s.exo_ref} {s.exo_b}")
             if j.servo_calibrated():
@@ -855,6 +863,8 @@ class HandModel:
                 s.exo_ref, s.exo_b = int(values[0]), int(values[1])
             elif key == "servo":
                 s.servo_a, s.servo_b = int(values[0]), int(values[1])
+            elif key == "travel":
+                s.travel_min, s.travel_max = int(values[0]), int(values[1])
             elif key in JOINT_NUMBER_KEYS:
                 setattr(s, key, int(values[0]))
             else:
@@ -874,12 +884,17 @@ class HandModel:
         )
 
     def _validate(self, j: Joint, s: Settings) -> str | None:
-        if s.enabled and j.d.travel_min == j.d.travel_max:
-            return "travel not defined in config.h: joint cannot be enabled"
+        if (s.travel_min, s.travel_max) != (0, 0):
+            if s.travel_min < 0 or s.travel_max > POSITION_MAX[j.d.model]:
+                return "travel outside the servo model's position range"
+            if s.travel_min >= s.travel_max:
+                return "travel min must be below max"
+        if s.enabled and s.travel_min >= s.travel_max:
+            return "travel not defined (`set <j> travel <min> <max>`): joint cannot be enabled"
         if s.encoder != NO_ENCODER and s.encoder >= 9:
             return "encoder index out of range"
-        if s.servo_a != s.servo_b and not all(j.d.travel_min <= v <= j.d.travel_max for v in (s.servo_a, s.servo_b)):
-            return "servo endpoint outside travel"
+        if s.servo_a != s.servo_b and not all(s.travel_min <= v <= s.travel_max for v in (s.servo_a, s.servo_b)):
+            return "servo endpoint outside travel (recapture it, or clear it with `set <j> servo 0 0`)"
         if not 1 <= s.vmax <= MAX_SPEED[j.d.model] or not 1 <= s.vsat <= MAX_SPEED[j.d.model]:
             return "vmax outside 1..max speed of the servo model"
         if s.ilimit and (j.d.model != HLS or not 7 <= s.ilimit <= 13306):
@@ -928,14 +943,14 @@ class HandModel:
             mismatches = 0
             for j in self.joints:
                 lo, hi = j.limits
-                match = (lo, hi) == (j.d.travel_min, j.d.travel_max)
+                match = (lo, hi) == (j.s.travel_min, j.s.travel_max)
                 mismatches += not match
                 self._emit(
                     EventCode.LIMITS_ROW,
                     j.d.servo_id,
                     (lo, hi, int(match)),
                     f"limits j{j.d.servo_id} {j.d.name:<13} servo {lo:4}..{hi:<4}  travel "
-                    f"{j.d.travel_min:4}..{j.d.travel_max:<4}  {'ok' if match else 'MISMATCH'}",
+                    f"{j.s.travel_min:4}..{j.s.travel_max:<4}  {'ok' if match else 'MISMATCH'}",
                 )
             self._emit(
                 EventCode.GENERIC,
@@ -954,7 +969,7 @@ class HandModel:
                     self._refuse(f"no joint with servo id {i}")
                     return
                 old = j.limits
-                j.limits = (j.d.travel_min, j.d.travel_max)
+                j.limits = (j.s.travel_min, j.s.travel_max)
                 self._emit(
                     EventCode.GENERIC,
                     i,
@@ -984,7 +999,7 @@ class HandModel:
             i,
             (),
             f"sweep j{i} ({j.d.name}, {MODEL_NAMES[j.d.model]}): range "
-            f"{j.d.travel_min}..{j.d.travel_max}, both directions",
+            f"{j.s.travel_min}..{j.s.travel_max}, both directions",
         )
         for level, speed in enumerate((100, 300, 600, 1000)):
             cmd = round(speed * j.scale)

@@ -177,3 +177,18 @@ def test_replay_phases_in_the_simulator() -> None:
     assert done(s.command("disarm")).ok
     s.dev.step(s.now)
     assert s.dev.model.replay_phase == ReplayPhase.IDLE
+
+
+def test_travel_is_a_setting() -> None:
+    s = Session()
+    s.open()
+    assert done(s.command("set 1 travel 260 720")).ok
+    slow = s.dev.model.slow_status()
+    assert (slow.joints[0].travel_min, slow.joints[0].travel_max) == (260, 720)
+    config = next(m for m in s.command("dump") if isinstance(m, Config))
+    assert "set 1 travel 260 720\n" in config.text
+    assert config.text.index("set 1 travel") < config.text.index("set 1 vmax")
+    assert not done(s.command("set 1 travel 260 1100")).ok  # beyond SCS0009's range
+    assert done(s.command("set 2 travel 800 4000")).ok  # HLS3606 goes to 4095
+    assert done(s.command("limits write 1")).ok
+    assert s.dev.model.joints[0].limits == (260, 720)
