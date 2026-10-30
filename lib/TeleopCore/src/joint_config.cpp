@@ -13,6 +13,8 @@ bool inRange(int32_t v, int32_t lo, int32_t hi) { return v >= lo && v <= hi; }
 
 JointSettings defaultSettings(const JointDefaults& d) {
   JointSettings s;
+  s.travelMin = d.travelMin;
+  s.travelMax = d.travelMax;
   s.enabled = d.enabled;
   s.encoderIndex = d.encoderIndex;
   s.exoRef = 0;
@@ -29,23 +31,31 @@ JointSettings defaultSettings(const JointDefaults& d) {
   return s;
 }
 
-bool servoCalibrated(const JointSettings& s, const JointDefaults& d) {
-  return travelDefined(d) && s.servoA != s.servoB && inRange(s.servoA, d.travelMin, d.travelMax) &&
-         inRange(s.servoB, d.travelMin, d.travelMax);
+bool servoCalibrated(const JointSettings& s, const JointDefaults&) {
+  return travelDefined(s) && s.servoA != s.servoB && inRange(s.servoA, s.travelMin, s.travelMax) &&
+         inRange(s.servoB, s.travelMin, s.travelMax);
 }
 
 bool jointReady(const JointSettings& s, const JointDefaults& d, uint8_t encoderCount) {
-  return travelDefined(d) && s.enabled && s.encoderIndex < encoderCount && exoCalibrated(s) &&
+  return travelDefined(s) && s.enabled && s.encoderIndex < encoderCount && exoCalibrated(s) &&
          servoCalibrated(s, d);
 }
 
 const char* validateJoint(const JointSettings& s, const JointDefaults& d, uint8_t encoderCount) {
-  if (!travelDefined(d) && s.enabled) return "travel not defined in config.h: joint cannot be enabled";
+  if (s.travelMin != 0 || s.travelMax != 0) {
+    // Inside the servo model's position range (SCS0009 0..1023, HLS3606 0..4095).
+    const int32_t maxPosition = feetech::modelInfo(d.model).positionMax;
+    if (s.travelMin < 0 || s.travelMax > maxPosition) return "travel outside the servo model's position range";
+    if (s.travelMin >= s.travelMax) return "travel min must be below max";
+  }
+  if (!travelDefined(s) && s.enabled) return "travel not defined (`set <j> travel <min> <max>`): joint cannot be enabled";
   if (s.encoderIndex != kNoEncoder && s.encoderIndex >= encoderCount) return "encoder index out of range";
   if (s.exoRef >= kEncoderCounts) return "exo reference out of range";
   if (s.exoB != 0 && labs(s.exoB) < kMinExoSpanCounts) return "exo span below 4 deg";
   if (labs(s.exoB) > kMaxExoSpanCounts) return "exo span above 3 encoder turns";
-  if (s.servoA != s.servoB && !servoCalibrated(s, d)) return "servo endpoint outside travel";
+  if (s.servoA != s.servoB && !servoCalibrated(s, d)) {
+    return "servo endpoint outside travel (recapture it, or clear it with `set <j> servo 0 0`)";
+  }
   // Bounds follow the servo model: its fastest speed register and its step size.
   const feetech::ModelInfo& m = feetech::modelInfo(d.model);
   const int32_t maxSpeed = static_cast<int32_t>(m.maxSpeedRegister * m.stepsPerSpeedUnit);
@@ -91,8 +101,8 @@ JointMap toJointMap(const JointSettings& s, const JointDefaults& d) {
   m.exoB = s.exoB;
   m.servoA = s.servoA;
   m.servoB = s.servoB;
-  m.servoMin = d.travelMin;
-  m.servoMax = d.travelMax;
+  m.servoMin = s.travelMin;
+  m.servoMax = s.travelMax;
   return m;
 }
 

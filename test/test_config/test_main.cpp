@@ -55,6 +55,8 @@ void configureSample(JointSettings* joints, GlobalSettings& g) {
 }
 
 void assertJointsEqual(const JointSettings& a, const JointSettings& b) {
+  TEST_ASSERT_EQUAL(a.travelMin, b.travelMin);
+  TEST_ASSERT_EQUAL(a.travelMax, b.travelMax);
   TEST_ASSERT_EQUAL(a.enabled, b.enabled);
   TEST_ASSERT_EQUAL(a.encoderIndex, b.encoderIndex);
   TEST_ASSERT_EQUAL(a.exoB, b.exoB);
@@ -138,7 +140,7 @@ void test_blob_round_trip() {
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
   TEST_ASSERT_EQUAL(kBlobSize, packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob)));
-  TEST_ASSERT_EQUAL(268, kBlobSize);
+  TEST_ASSERT_EQUAL(304, kBlobSize);
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
@@ -155,16 +157,34 @@ void test_blob_round_trip() {
   TEST_ASSERT_EQUAL(400, lg.supplyMs);
 }
 
-// A version 4 blob is version 5 without the supply window and with its own CRC.
+// Older layouts, made from a current blob: drop each joint's travel (v5) and
+// the supply window (v4), then fix the version and CRC.
+size_t packOlder(const JointSettings* joints, const GlobalSettings& g, uint16_t version, uint8_t* out) {
+  uint8_t current[kBlobSize];
+  packConfig(joints, kDefaults, kMaxJoints, g, current, sizeof(current));
+  size_t n = 0;
+  memcpy(out, current, 8);
+  n = 8;
+  for (uint8_t i = 0; i < kMaxJoints; ++i) {
+    memcpy(out + n, current + 8 + i * kJointRecordSize, kJointRecordSizeV5);
+    n += kJointRecordSizeV5;
+  }
+  const size_t global = version == 4 ? kGlobalRecordSizeV4 : kGlobalRecordSize;
+  memcpy(out + n, current + 8 + kMaxJoints * kJointRecordSize, global);
+  n += global;
+  out[4] = static_cast<uint8_t>(version);
+  const uint32_t crc = crc32(out, n);
+  for (int i = 0; i < 4; ++i) out[n + i] = static_cast<uint8_t>(crc >> (8 * i));
+  return n + 4;
+}
+
+// A version 4 blob has neither travel nor supply window.
 void test_blob_version_4_upgraded() {
   JointSettings joints[kMaxJoints];
   GlobalSettings g;
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
-  packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob));
-  blob[4] = 4;
-  const uint32_t crc = crc32(blob, kBlobSizeV4 - 4);
-  for (int i = 0; i < 4; ++i) blob[kBlobSizeV4 - 4 + i] = static_cast<uint8_t>(crc >> (8 * i));
+  TEST_ASSERT_EQUAL(kBlobSizeV4, packOlder(joints, g, 4, blob));
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
@@ -178,9 +198,68 @@ void test_blob_version_4_upgraded() {
   TEST_ASSERT_EQUAL_FLOAT(5.5f, lg.supplyMinV);
   TEST_ASSERT_EQUAL_FLOAT(6.5f, lg.supplyMaxV);
   TEST_ASSERT_EQUAL(200, lg.supplyMs);
-  // A version 4 header on a version 5 length is not a valid blob.
+  // A version 4 header on a current length is not a valid blob.
   TEST_ASSERT_EQUAL(BlobStatus::BadSize, unpackConfig(blob, kBlobSize, kDefaults, kMaxJoints, kEncoders, defaults,
                                                       loaded, lg));
+}
+
+// A version 5 blob keeps everything but takes each joint's travel from config.h.
+void test_blob_version_5_takes_travel_from_defaults() {
+  JointSettings joints[kMaxJoints];
+  GlobalSettings g;
+  configureSample(joints, g);
+  joints[2].travelMin = 300;  // lost: v5 has no travel
+  joints[2].travelMax = 560;
+  uint8_t blob[kBlobSize];
+  TEST_ASSERT_EQUAL(kBlobSizeV5, packOlder(joints, g, 5, blob));
+  JointSettings loaded[kMaxJoints];
+  GlobalSettings lg;
+  TEST_ASSERT_EQUAL(BlobStatus::Upgraded, unpackConfig(blob, kBlobSizeV5, kDefaults, kMaxJoints, kEncoders,
+                                                       GlobalSettings(), loaded, lg));
+  TEST_ASSERT_EQUAL(kDefaults[2].travelMin, loaded[2].travelMin);
+  TEST_ASSERT_EQUAL(kDefaults[2].travelMax, loaded[2].travelMax);
+  TEST_ASSERT_EQUAL(joints[0].servoA, loaded[0].servoA);
+  TEST_ASSERT_EQUAL_FLOAT(5.0f, lg.supplyMinV);  // v5 has the supply window
+}
+
+void test_travel_setting_rules() {
+  JointSettings joints[kMaxJoints];
+  loadDefaults(joints);
+  GlobalSettings g;
+  ParsedCommand c;
+  TEST_ASSERT_EQUAL(350, joints[0].travelMin);  // config.h default
+  TEST_ASSERT_NULL(parseCommand("set 1 travel 300 760", c));
+  TEST_ASSERT_EQUAL(SetKey::Travel, c.key);
+  TEST_ASSERT_TRUE(requiresDisarmed(c));
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL(300, joints[0].travelMin);
+  TEST_ASSERT_EQUAL(760, joints[0].travelMax);
+  parseCommand("set 1 travel 300 1100", c);  // beyond SCS0009's 0..1023
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 6 travel 300 4000", c);  // HLS3606 goes to 4095
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 1 travel 700 400", c);
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_NOT_NULL(parseCommand("set 1 travel 400", c));
+
+  // Calibrated endpoints must stay inside a narrowed travel.
+  joints[0].servoA = 320;
+  joints[0].servoB = 740;
+  parseCommand("set 1 travel 400 700", c);
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 1 servo 0 0", c);  // cleared
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 1 travel 400 700", c);
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+
+  // A measured travel makes joint 9 (0/0 in config.h) usable.
+  TEST_ASSERT_FALSE(travelDefined(joints[8]));
+  parseCommand("set 9 on", c);
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 9 travel 480 950", c);
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  parseCommand("set 9 on", c);
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
 }
 
 void test_supply_window_rules() {
@@ -624,6 +703,8 @@ void test_dump_round_trip() {
   joints[2].exoRef = 300;
   joints[2].exoB = 20000;  // 1.2 encoder turns: only exospan can carry it
   joints[1].currentLimitMa = 650;  // HLS joint
+  joints[0].travelMin = 340;  // this robot's own travel, wider than config.h's 350..730
+  joints[0].travelMax = 750;
   char text[3072];
   const size_t n = formatDump(joints, kDefaults, kMaxJoints, g, text, sizeof(text), "left");
   TEST_ASSERT_TRUE(n > 0);
@@ -676,6 +757,8 @@ int main() {
   RUN_TEST(test_exo_raw_b_wraps);
   RUN_TEST(test_blob_round_trip);
   RUN_TEST(test_blob_version_4_upgraded);
+  RUN_TEST(test_blob_version_5_takes_travel_from_defaults);
+  RUN_TEST(test_travel_setting_rules);
   RUN_TEST(test_supply_window_rules);
   RUN_TEST(test_blob_rejects_corruption_without_touching_output);
   RUN_TEST(test_blob_invalid_joint_reset_to_defaults);

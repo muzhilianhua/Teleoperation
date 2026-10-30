@@ -67,7 +67,7 @@ const char* blobStatusToString(BlobStatus status) {
     case BlobStatus::BadJointCount: return "joint count mismatch";
     case BlobStatus::InvalidJoint: return "invalid joint settings (or changed servo model) reset to defaults";
     case BlobStatus::InvalidGlobal: return "invalid global settings reset to defaults";
-    case BlobStatus::Upgraded: return "format v4, supply window at its defaults";
+    case BlobStatus::Upgraded: return "older format: travel from config.h (and supply window defaults for v4)";
   }
   return "?";
 }
@@ -109,6 +109,8 @@ size_t packConfig(const JointSettings* joints, const JointDefaults* defaults, ui
     w.u16(s.trackSteps);
     w.u16(s.gripSteps);
     w.u16(s.currentLimitMa);
+    w.u16(static_cast<uint16_t>(s.travelMin));
+    w.u16(static_cast<uint16_t>(s.travelMax));
   }
   w.f32(global.leadMs);
   w.f32(global.minCutoffHz);
@@ -132,8 +134,8 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, const JointDefaults* d
   if (r.u32() != kBlobMagic) return BlobStatus::BadMagic;
   const uint16_t version = r.u16();
   if (version >= 1 && version < 4) return BlobStatus::Superseded;
-  if (version != 4 && version != kBlobVersion) return BlobStatus::BadVersion;
-  if (length != (version == 4 ? kBlobSizeV4 : kBlobSize)) return BlobStatus::BadSize;
+  if (version != 4 && version != 5 && version != kBlobVersion) return BlobStatus::BadVersion;
+  if (length != (version == 4 ? kBlobSizeV4 : version == 5 ? kBlobSizeV5 : kBlobSize)) return BlobStatus::BadSize;
   Reader crcReader(in + length - 4);
   if (crcReader.u32() != crc32(in, length - 4)) return BlobStatus::BadCrc;
   r.u8();  // reserved
@@ -156,6 +158,13 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, const JointDefaults* d
     s.trackSteps = r.u16();
     s.gripSteps = r.u16();
     s.currentLimitMa = r.u16();
+    if (version >= 6) {
+      s.travelMin = r.i16();
+      s.travelMax = r.i16();
+    } else {
+      s.travelMin = defaults[i].travelMin;
+      s.travelMax = defaults[i].travelMax;
+    }
   }
   GlobalSettings g = globalDefaults;
   g.leadMs = r.f32();
@@ -164,7 +173,7 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, const JointDefaults* d
   g.jumpDeg = r.f32();
   g.gripLoadPct = r.f32();
   g.loadTripEnabled = r.u8() != 0;
-  if (version == kBlobVersion) {
+  if (version >= 5) {
     g.supplyMinV = r.f32();
     g.supplyMaxV = r.f32();
     g.supplyMs = r.u16();

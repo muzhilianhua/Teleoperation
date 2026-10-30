@@ -55,6 +55,7 @@ enum class SetKey : uint8_t {
   Exo,        // values[0..1] = raw counts at A and B (legacy, span < half a turn)
   ExoSpan,    // values[0] = raw count at A, values[1] = continuous span to B in counts
   Servo,      // values[0..1] = servo counts at A and B
+  Travel,     // values[0..1] = travel min and max, servo counts
   VMax,
   AMax,
   VSat,

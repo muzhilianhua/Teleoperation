@@ -1,8 +1,10 @@
-// Per-joint configuration: compile-time robot facts (JointDefaults) and the
-// persisted, operator-entered settings (JointSettings).
+// Per-joint configuration: compile-time robot facts and defaults
+// (JointDefaults) and the persisted, operator-entered settings (JointSettings).
 //
-// Travel limits deliberately exist only in JointDefaults so no console command
-// can widen them; everything an operator calibrates lives in JointSettings.
+// Travel (the mechanical limits) differs from robot to robot with assembly, so
+// it is a setting too: config.h only provides the default, `set <j> travel`
+// changes it (disarmed only, within the servo model's position range), and it
+// is stored, dumped and restored with the rest of the calibration.
 
 #pragma once
 
@@ -25,7 +27,7 @@ struct JointDefaults {
   uint8_t servoId;
   const char* name;
   feetech::ServoModel model;
-  int16_t travelMin;
+  int16_t travelMin;  // default travel; JointSettings holds the robot's own
   int16_t travelMax;
   uint16_t vmax;  // steps/s, rate-limiter ceiling
   uint16_t vsat;  // steps/s, measured capability used by the tracking check
@@ -35,6 +37,11 @@ struct JointDefaults {
 };
 
 struct JointSettings {
+  // Mechanical travel of this robot, in servo steps: the range every goal is
+  // clamped to and what `limits write` stores in the servo. min >= max = not
+  // measured yet (monitor only).
+  int16_t travelMin = 0;
+  int16_t travelMax = 0;
   bool enabled = false;
   uint8_t encoderIndex = kNoEncoder;
   // Operator side: raw encoder count at endpoint A, and endpoint B as the
@@ -103,6 +110,7 @@ inline float scaledSteps(const JointDefaults& d, float scsSteps) { return scsSte
 
 // Travel min >= max marks a joint whose limits have not been measured yet.
 inline bool travelDefined(const JointDefaults& d) { return d.travelMin < d.travelMax; }
+inline bool travelDefined(const JointSettings& s) { return s.travelMin < s.travelMax; }
 inline bool exoCalibrated(const JointSettings& s) { return s.exoB != 0; }
 bool servoCalibrated(const JointSettings& s, const JointDefaults& d);
 bool jointReady(const JointSettings& s, const JointDefaults& d, uint8_t encoderCount);

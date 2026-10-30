@@ -144,6 +144,17 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     out.values[0] = static_cast<float>(index);
     return nullptr;
   }
+  if (eq(key, "travel")) {
+    long lo = 0, hi = 0;
+    if (tk.n != 5 || !parseInt(tk.t[3], 0, 4095, lo) || !parseInt(tk.t[4], 0, 4095, hi)) {
+      return "usage: set <joint> travel <min> <max> (servo counts; 0 0 = not measured)";
+    }
+    out.key = SetKey::Travel;
+    out.values[0] = static_cast<float>(lo);
+    out.values[1] = static_cast<float>(hi);
+    out.valueCount = 2;
+    return nullptr;
+  }
   if (eq(key, "exo") || eq(key, "servo")) {
     const bool exo = eq(key, "exo");
     long a = 0, b = 0;
@@ -180,7 +191,7 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     out.valueCount = 1;
     return nullptr;
   }
-  return "unknown key (on off enc exo exospan servo vmax amax vsat trk grip ilimit itrip | lead mincut beta jump gripload loadtrip supplymin supplymax supplyms)";
+  return "unknown key (on off enc travel exo exospan servo vmax amax vsat trk grip ilimit itrip | lead mincut beta jump gripload loadtrip supplymin supplymax supplyms)";
 }
 
 struct Simple {
@@ -377,7 +388,7 @@ bool requiresDisarmed(const ParsedCommand& c) {
     case Verb::Set:
       return c.key == SetKey::Enable || c.key == SetKey::Encoder || c.key == SetKey::Exo ||
              c.key == SetKey::ExoSpan ||
-             c.key == SetKey::Servo;
+             c.key == SetKey::Servo || c.key == SetKey::Travel;
     default:
       return false;
   }
@@ -435,6 +446,10 @@ const char* applySetting(const ParsedCommand& c, JointSettings* joints, const Jo
       s.servoA = static_cast<int16_t>(v0);
       s.servoB = static_cast<int16_t>(v1);
       break;
+    case SetKey::Travel:
+      s.travelMin = static_cast<int16_t>(v0);
+      s.travelMax = static_cast<int16_t>(v1);
+      break;
     case SetKey::VMax: s.vmax = static_cast<uint16_t>(v0); break;
     case SetKey::AMax: s.amax = static_cast<uint16_t>(v0); break;
     case SetKey::VSat: s.vsat = static_cast<uint16_t>(v0); break;
@@ -463,6 +478,8 @@ size_t formatDump(const JointSettings* joints, const JointDefaults* defaults, ui
     } else {
       a.add("set %u enc %u\n", d.servoId, s.encoderIndex);
     }
+    // Before `servo`: the endpoints are checked against the travel.
+    a.add("set %u travel %d %d\n", d.servoId, s.travelMin, s.travelMax);
     if (exoCalibrated(s)) a.add("set %u exospan %u %ld\n", d.servoId, s.exoRef, static_cast<long>(s.exoB));
     if (servoCalibrated(s, d)) a.add("set %u servo %d %d\n", d.servoId, s.servoA, s.servoB);
     a.add("set %u vmax %u\nset %u amax %u\nset %u vsat %u\nset %u trk %u\nset %u grip %u\n", d.servoId,
