@@ -30,7 +30,7 @@ void describeServoError(const ServoState& st, char* out, size_t length) {
 }
 
 const char* notReadyReason(const teleop::JointSettings& s, const teleop::JointDefaults& d) {
-  if (!teleop::travelDefined(d)) return "travel not defined in config.h";
+  if (!teleop::travelDefined(s)) return "travel not defined (set <j> travel <min> <max>)";
   if (!s.enabled) return "disabled";
   if (s.encoderIndex >= config::kEncoderCount) return "no encoder assigned (set <j> enc <n>)";
   if (!teleop::exoCalibrated(s)) return "exo not calibrated (cal <j> a / b)";
@@ -69,8 +69,8 @@ void TeleopController::bindJointTable() {
     ch.scale = teleop::stepScale(*ch.def);
     bus_.setModel(ch.def->servoId, ch.def->model);  // until boot identifies the bus
     ch.settings = teleop::defaultSettings(*ch.def);
-    ch.limiter = teleop::RateLimiter(ch.def->travelMin, ch.settings.vmax, ch.settings.amax,
-                                     ch.def->travelMin, ch.def->travelMax);
+    ch.limiter = teleop::RateLimiter(ch.settings.travelMin, ch.settings.vmax, ch.settings.amax,
+                                     ch.settings.travelMin, ch.settings.travelMax);
     ch.model = ch.limiter;
     resetChannelRuntime(ch);
     applyRuntimeParams(ch);
@@ -245,10 +245,10 @@ void TeleopController::applyRuntimeParams(JointChannel& ch) {
   gc.minLead *= ch.scale;
   gc.stallSpeed *= ch.scale;
   ch.grip.setConfig(gc);
-  ch.limiter.setTravel(ch.def->travelMin, ch.def->travelMax);
+  ch.limiter.setTravel(ch.settings.travelMin, ch.settings.travelMax);
   const float speed = ch.state == JointState::Align ? config::kArmSpeed * ch.scale : ch.settings.vmax;
   ch.limiter.setLimits(speed, ch.settings.amax);
-  ch.model.setTravel(ch.def->travelMin, ch.def->travelMax);
+  ch.model.setTravel(ch.settings.travelMin, ch.settings.travelMax);
   ch.model.setLimits(ch.settings.vsat, kModelAcceleration);
 }
 
@@ -839,8 +839,8 @@ void TeleopController::handleCalHand(const Command& c) {
     refuse("no joint with servo id %u", c.joint);
     return;
   }
-  if (!teleop::travelDefined(*ch->def)) {
-    refuse("joint %u: travel not defined in config.h; measure it with `monitor on` first", c.joint);
+  if (!teleop::travelDefined(ch->settings)) {
+    refuse("joint %u: travel not defined (set <j> travel <min> <max>); measure it with `monitor on` first", c.joint);
     return;
   }
   ServoState st;
@@ -853,9 +853,9 @@ void TeleopController::handleCalHand(const Command& c) {
     refuse("joint %u: servo had torque on, switched off; move the finger by hand and retry", c.joint);
     return;
   }
-  if (st.position < ch->def->travelMin || st.position > ch->def->travelMax) {
+  if (st.position < ch->settings.travelMin || st.position > ch->settings.travelMax) {
     refuse("joint %u: position %d outside travel [%d, %d], rejected", c.joint, st.position,
-            ch->def->travelMin, ch->def->travelMax);
+            ch->settings.travelMin, ch->settings.travelMax);
     return;
   }
   (c.flag ? ch->settings.servoB : ch->settings.servoA) = st.position;
@@ -872,15 +872,15 @@ void TeleopController::handleLimitsCheck() {
       event({EV::LimitsRow, id, SV::Warning, {0, 0, -1}}, "limits j%u %-13s no reply", id, ch.def->name);
       continue;
     }
-    if (!teleop::travelDefined(*ch.def)) {
+    if (!teleop::travelDefined(ch.settings)) {
       event({EV::LimitsRow, id, SV::Info, {lo, hi, -2}}, "limits j%u %-13s servo %4d..%-4d  travel undefined", id, ch.def->name, lo, hi);
       continue;
     }
-    const bool match = lo == ch.def->travelMin && hi == ch.def->travelMax;
+    const bool match = lo == ch.settings.travelMin && hi == ch.settings.travelMax;
     mismatches += match ? 0 : 1;
     const bool multiTurn = lo == 0 && hi == 0 && bus_.model(id) == feetech::ServoModel::Hls3606;
     event({EV::LimitsRow, id, SV::Info, {lo, hi, match ? 1 : 0}}, "limits j%u %-13s servo %4d..%-4d  travel %4d..%-4d  %s", id, ch.def->name, lo, hi,
-            ch.def->travelMin, ch.def->travelMax,
+            ch.settings.travelMin, ch.settings.travelMax,
             match ? "ok" : (multiTurn ? "MISMATCH (HLS factory multi-turn)" : "MISMATCH"));
   }
   message(mismatches ? "%u mismatch(es): `limits write all` syncs them" : "all defined joints match",
@@ -891,7 +891,7 @@ void TeleopController::handleLimitsWrite(uint8_t servoId) {
   for (const JointChannel& ch : channels_) {
     const uint8_t id = ch.def->servoId;
     if (servoId != 0 && id != servoId) continue;
-    if (!teleop::travelDefined(*ch.def)) {
+    if (!teleop::travelDefined(ch.settings)) {
       event({EV::Generic, id, SV::Warning}, "limits j%u: travel undefined in config.h, skipped", id);
       continue;
     }
@@ -900,13 +900,13 @@ void TeleopController::handleLimitsWrite(uint8_t servoId) {
       event({EV::Generic, id, SV::Warning}, "limits j%u: no reply, skipped", id);
       continue;
     }
-    if (lo == ch.def->travelMin && hi == ch.def->travelMax) {
+    if (lo == ch.settings.travelMin && hi == ch.settings.travelMax) {
       if (servoId != 0) message("limits j%u: already %d..%d, nothing written", id, lo, hi);
       continue;  // EEPROM is only written when it differs
     }
-    const bool ok = bus_.writeAngleLimits(id, ch.def->travelMin, ch.def->travelMax);
+    const bool ok = bus_.writeAngleLimits(id, ch.settings.travelMin, ch.settings.travelMax);
     const bool hls = bus_.model(id) == feetech::ServoModel::Hls3606;
-    event({EV::Generic, id, ok ? SV::Info : SV::Error}, "limits j%u: %d..%d -> %d..%d %s%s", id, lo, hi, ch.def->travelMin, ch.def->travelMax,
+    event({EV::Generic, id, ok ? SV::Info : SV::Error}, "limits j%u: %d..%d -> %d..%d %s%s", id, lo, hi, ch.settings.travelMin, ch.settings.travelMax,
             ok ? "written and verified" : "FAILED (torque must be off; check the bus)",
             ok && hls ? "; power-cycle the servos before arming" : "");
     if (!ok) cmdFailed_ = true;
@@ -924,13 +924,13 @@ void TeleopController::handleSweep(uint8_t servoId) {
   }
   JointChannel& ch = channels_[index];
   const teleop::JointDefaults& d = *ch.def;
-  if (!teleop::travelDefined(d)) {
-    refuse("sweep refused: joint %u travel not defined in config.h", servoId);
+  if (!teleop::travelDefined(ch.settings)) {
+    refuse("sweep refused: joint %u travel not defined (set %u travel <min> <max>)", servoId, servoId);
     return;
   }
   // Calibrated servo endpoints are the range the operator has checked by hand;
-  // otherwise the configured travel. 10 SCS steps of margin on each side.
-  int16_t lo = d.travelMin, hi = d.travelMax;
+  // otherwise the stored travel. 10 SCS steps of margin on each side.
+  int16_t lo = ch.settings.travelMin, hi = ch.settings.travelMax;
   if (teleop::servoCalibrated(ch.settings, d)) {
     lo = min(ch.settings.servoA, ch.settings.servoB);
     hi = max(ch.settings.servoA, ch.settings.servoB);
@@ -946,7 +946,8 @@ void TeleopController::handleSweep(uint8_t servoId) {
     refuse("sweep refused: no reply from servo %u", servoId);
     return;
   }
-  if (st.errorByte != 0 || st.status != 0 || st.position < d.travelMin || st.position > d.travelMax) {
+  if (st.errorByte != 0 || st.status != 0 || st.position < ch.settings.travelMin ||
+      st.position > ch.settings.travelMax) {
     refuse("sweep refused: servo %u error 0x%02X or position %d outside travel", servoId, st.errorByte,
             st.position);
     return;
@@ -1188,9 +1189,9 @@ bool TeleopController::preflight(uint8_t index, ServoState& st) {
     refuse("arm refused: servo %u error byte 0x%02X status 0x%02X", id, st.errorByte, st.status);
     return false;
   }
-  if (st.position < ch.def->travelMin || st.position > ch.def->travelMax) {
+  if (st.position < ch.settings.travelMin || st.position > ch.settings.travelMax) {
     refuse("arm refused: servo %u at %d outside travel [%d, %d]; move it back by hand", id,
-            st.position, ch.def->travelMin, ch.def->travelMax);
+            st.position, ch.settings.travelMin, ch.settings.travelMax);
     return false;
   }
   return true;
@@ -1211,7 +1212,7 @@ const char* TeleopController::armJoint(uint8_t index, const ServoState& st, uint
     if (info.minLimit == 0 && info.maxLimit == 0) {
       return "HLS angle limits are 0/0 (factory multi-turn): run `limits write <j>`, then power-cycle";
     }
-    if (info.minLimit > ch.def->travelMin || info.maxLimit < ch.def->travelMax) {
+    if (info.minLimit > ch.settings.travelMin || info.maxLimit < ch.settings.travelMax) {
       return "HLS angle limits do not cover the travel: run `limits write <j>`, then power-cycle";
     }
     if (info.resolution != 1) return "HLS angle resolution (register 30) is not 1";
@@ -1403,7 +1404,7 @@ bool TeleopController::preflightReplay(uint8_t index, ServoState& st) {
     refuse("replay refused: servo %u model not as in config.h (run `ping`)", id);
     return false;
   }
-  if (!teleop::travelDefined(*ch.def) || !ch.settings.enabled) {
+  if (!teleop::travelDefined(ch.settings) || !ch.settings.enabled) {
     refuse("replay refused: joint %u is disabled or has no travel in config.h", id);
     return false;
   }
@@ -1415,9 +1416,9 @@ bool TeleopController::preflightReplay(uint8_t index, ServoState& st) {
     refuse("replay refused: servo %u error byte 0x%02X status 0x%02X", id, st.errorByte, st.status);
     return false;
   }
-  if (st.position < ch.def->travelMin || st.position > ch.def->travelMax) {
-    refuse("replay refused: servo %u at %d outside travel [%d, %d]", id, st.position, ch.def->travelMin,
-           ch.def->travelMax);
+  if (st.position < ch.settings.travelMin || st.position > ch.settings.travelMax) {
+    refuse("replay refused: servo %u at %d outside travel [%d, %d]", id, st.position, ch.settings.travelMin,
+           ch.settings.travelMax);
     return false;
   }
   return true;

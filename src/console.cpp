@@ -422,6 +422,7 @@ void Console::printHelp() {
       "  cal <j> a|b          capture exo endpoint   cal <j> hand a|b servo endpoint (move by hand)\n"
       "  home <j>             multi-turn joint: glove held at pose A, fixes the turn count\n"
       "  set <j> exospan <rawA> <span> | servo <a> <b>  enter endpoints directly (dump format)\n"
+      "  set <j> travel <min> <max>                 this robot's mechanical limits (then `limits write`)\n"
       "  set <j> vmax|amax|vsat|trk|grip <n>        per-joint speed / tracking / grip lead (0 = off)\n"
       "  set <j> ilimit <mA>                        HLS goal-current cap (0 = servo protection current)\n"
       "  set <j> itrip <%>                          HLS over-current trip, % of cap (0 = off; not saved)\n"
@@ -499,8 +500,8 @@ void Console::printJoints() {
       strlcpy(servo, "    --    ", sizeof(servo));
     }
     char travel[12];
-    if (teleop::travelDefined(d)) {
-      snprintf(travel, sizeof(travel), "%4d..%-4d", d.travelMin, d.travelMax);
+    if (teleop::travelDefined(s)) {
+      snprintf(travel, sizeof(travel), "%4d..%-4d", s.travelMin, s.travelMax);
     } else {
       strlcpy(travel, " undefined", sizeof(travel));
     }
