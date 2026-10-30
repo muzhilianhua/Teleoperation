@@ -192,3 +192,42 @@ def test_travel_is_a_setting() -> None:
     assert done(s.command("set 2 travel 800 4000")).ok  # HLS3606 goes to 4095
     assert done(s.command("limits write 1")).ok
     assert s.dev.model.joints[0].limits == (260, 720)
+
+
+def test_zero_moves_offset_travel_and_limits() -> None:
+    s = Session()
+    s.open()
+    model = s.dev.model
+    j = model.joints[3]  # servo 4, HLS, travel 1750..3240
+    j.position = j.goal = j.target = 2995.0  # held 500 steps above the centre
+    assert done(s.command("set 4 servo 1800 3200")).ok
+    assert done(s.command("zero 4")).ok
+    assert j.servo_offset == -947 and round(j.position) == 2048
+    assert (j.s.travel_min, j.s.travel_max, j.s.servo_a, j.s.servo_b) == (803, 2293, 853, 2253)
+    assert j.limits == (0, 0)  # multi-turn until `limits write`
+    assert model.slow_status().joints[3].offset == -947
+    config = next(m for m in s.command("dump") if isinstance(m, Config))
+    assert config.text.index("set 4 offset -947") < config.text.index("set 4 travel 803 2293")
+
+    # The stored offset is checked and written with the limits.
+    j.servo_offset = 0
+    rows = [e for e in s.command("limits check") if isinstance(e, Event) and e.code == EventCode.LIMITS_ROW]
+    row = next(e for e in rows if e.joint == 4)
+    assert row.args[2] == 0 and row.args[3] == 0 and "MISMATCH (offset)" in row.text
+    assert done(s.command("limits write 4")).ok
+    assert j.servo_offset == -947 and j.limits == (803, 2293)
+
+    assert not done(s.command("zero 1")).ok  # SCS0009: no offset register
+    assert not done(s.command("set 1 offset 10")).ok
+    assert done(s.command("set 4 offset none")).ok
+    assert "set 4 offset" not in next(m for m in s.command("dump") if isinstance(m, Config)).text
+
+
+def test_zero_clears_a_travel_that_would_cross_the_seam() -> None:
+    s = Session()
+    s.open()
+    j = s.dev.model.joints[3]
+    assert done(s.command("set 4 travel 300 2700")).ok  # more than half a turn
+    j.position = j.goal = j.target = 310.0  # zeroed near one end, not mid-travel
+    assert done(s.command("zero 4")).ok  # 300..2700 would read 2038..4438, i.e. 2038..342
+    assert (j.s.travel_min, j.s.travel_max) == (0, 0) and not j.s.enabled

@@ -12,6 +12,7 @@ import math
 from dataclasses import dataclass, field, replace
 
 from ..protocol.messages import (
+    OFFSET_UNSET,
     DeviceInfo,
     Event,
     EventCode,
@@ -56,6 +57,37 @@ FAULT_NAMES = [
 EVENT_NAMES = [code.name.lower() for code in EventCode]
 MODEL_NAMES = ["unknown", "SCS0009", "HLS3606"]
 MIN_SPAN, MAX_SPAN = 182, 3 * ENCODER_COUNTS
+ZERO_CENTER, MAX_OFFSET = 2048, 4095  # as lib/TeleopCore/src/hls_offset.h
+
+
+def fold_offset(offset: int) -> int:
+    while offset > MAX_OFFSET:
+        offset -= MAX_OFFSET + 1
+    while offset < -MAX_OFFSET:
+        offset += MAX_OFFSET + 1
+    return offset
+
+
+def center_offset(offset: int, position: int) -> int:
+    return fold_offset(offset + ZERO_CENTER - position)
+
+
+def shift_for_offset(s: Settings, delta: int, position_max: int) -> bool:
+    """Moves travel and servo endpoints with a new offset; False (all cleared) if the travel would cross the seam."""
+    turn = position_max + 1
+    calibrated = s.servo_a != s.servo_b
+    if s.travel_min < s.travel_max:
+        lo, hi = (s.travel_min + delta) % turn, (s.travel_max + delta) % turn
+        if lo >= hi:
+            s.travel_min = s.travel_max = s.servo_a = s.servo_b = 0
+            s.enabled = False
+            return False
+        s.travel_min, s.travel_max = lo, hi
+    if calibrated:
+        s.servo_a, s.servo_b = (s.servo_a + delta) % turn, (s.servo_b + delta) % turn
+    else:
+        s.servo_a = s.servo_b = s.travel_min
+    return True
 
 
 @dataclass(frozen=True)
@@ -99,6 +131,7 @@ class Settings:
     grip: int = 60
     ilimit: int = 0
     itrip: int = 90
+    offset: int | None = None  # HLS position offset the travel was measured with; None = not stored
 
 
 def default_settings(d: JointDefaults) -> Settings:
@@ -130,6 +163,7 @@ class Joint:
     tracking: bool = False  # exo continuously tracked since `cal a`
     homed: bool = True
     limits: tuple[int, int] = (0, 0)
+    servo_offset: int = 0  # the servo's register 31
     sweep_until: float = 0.0
     sweep_result: tuple[int, int] | None = None
 
@@ -161,8 +195,8 @@ class Result:
     config: str | None = None
 
 
-DISARMED_VERBS = {"cal", "save", "load", "defaults", "ping", "limits", "sweep"}
-DISARMED_SET_KEYS = {"on", "off", "enc", "exo", "exospan", "servo", "travel"}
+DISARMED_VERBS = {"cal", "save", "load", "defaults", "ping", "limits", "sweep", "zero"}
+DISARMED_SET_KEYS = {"on", "off", "enc", "exo", "exospan", "servo", "travel", "offset"}
 JOINT_NUMBER_KEYS = {"vmax", "amax", "vsat", "trk", "grip", "ilimit", "itrip"}
 GLOBAL_KEYS = {
     "lead": "lead_ms",
@@ -352,6 +386,7 @@ class HandModel:
                 0,
                 j.s.travel_min,
                 j.s.travel_max,
+                OFFSET_UNSET if j.s.offset is None else j.s.offset,
             )
             for j in self.joints
         ]
@@ -632,6 +667,8 @@ class HandModel:
             s, i = j.s, j.d.servo_id
             out.append(f"# {i} {j.d.name}")
             out.append(f"set {i} enc {'none' if s.encoder == NO_ENCODER else s.encoder}")
+            if s.offset is not None:
+                out.append(f"set {i} offset {s.offset}")
             out.append(f"set {i} travel {s.travel_min} {s.travel_max}")
             if j.exo_calibrated():
                 out.append(f"set {i} exospan {s.exo_ref} {s.exo_b}")
@@ -695,6 +732,12 @@ class HandModel:
                 return
             if not j.ready():
                 self._refuse(f"arm refused: joint {j.d.servo_id} not ready")
+                return
+            if j.d.model == HLS and j.s.offset is not None and j.s.offset != j.servo_offset:
+                self._refuse(
+                    f"arm refused: joint {j.d.servo_id}: HLS position offset differs from the stored one "
+                    "(`limits check`): run `limits write <j>`, then power-cycle"
+                )
                 return
         for j in targets:
             assert j is not None
@@ -865,6 +908,8 @@ class HandModel:
                 s.servo_a, s.servo_b = int(values[0]), int(values[1])
             elif key == "travel":
                 s.travel_min, s.travel_max = int(values[0]), int(values[1])
+            elif key == "offset":
+                s.offset = None if values == ["none"] else int(values[0])
             elif key in JOINT_NUMBER_KEYS:
                 setattr(s, key, int(values[0]))
             else:
@@ -891,6 +936,11 @@ class HandModel:
                 return "travel min must be below max"
         if s.enabled and s.travel_min >= s.travel_max:
             return "travel not defined (`set <j> travel <min> <max>`): joint cannot be enabled"
+        if s.offset is not None:
+            if j.d.model != HLS:
+                return "offset applies to HLS3606 joints only"
+            if abs(s.offset) > MAX_OFFSET:
+                return "offset outside -4095..4095"
         if s.encoder != NO_ENCODER and s.encoder >= 9:
             return "encoder index out of range"
         if s.servo_a != s.servo_b and not all(s.travel_min <= v <= s.travel_max for v in (s.servo_a, s.servo_b)):
@@ -943,14 +993,30 @@ class HandModel:
             mismatches = 0
             for j in self.joints:
                 lo, hi = j.limits
-                match = (lo, hi) == (j.s.travel_min, j.s.travel_max)
+                hls = j.d.model == HLS
+                offset = j.servo_offset if hls else 0
+                note = ""
+                if hls:
+                    stored = "none stored" if j.s.offset is None else f"stored {j.s.offset}"
+                    note = f"  offset {offset} ({stored})"
+                if j.s.travel_min >= j.s.travel_max:
+                    self._emit(
+                        EventCode.LIMITS_ROW,
+                        j.d.servo_id,
+                        (lo, hi, -2, offset),
+                        f"limits j{j.d.servo_id} {j.d.name:<13} servo {lo:4}..{hi:<4}  travel undefined{note}",
+                    )
+                    continue
+                offset_ok = not hls or j.s.offset is None or j.s.offset == offset
+                match = (lo, hi) == (j.s.travel_min, j.s.travel_max) and offset_ok
                 mismatches += not match
+                verdict = "ok" if match else "MISMATCH" if offset_ok else "MISMATCH (offset)"
                 self._emit(
                     EventCode.LIMITS_ROW,
                     j.d.servo_id,
-                    (lo, hi, int(match)),
+                    (lo, hi, int(match), offset),
                     f"limits j{j.d.servo_id} {j.d.name:<13} servo {lo:4}..{hi:<4}  travel "
-                    f"{j.s.travel_min:4}..{j.s.travel_max:<4}  {'ok' if match else 'MISMATCH'}",
+                    f"{j.s.travel_min:4}..{j.s.travel_max:<4}{note}  {verdict}",
                 )
             self._emit(
                 EventCode.GENERIC,
@@ -968,16 +1034,72 @@ class HandModel:
                 if j is None:
                     self._refuse(f"no joint with servo id {i}")
                     return
-                old = j.limits
+                if j.s.travel_min >= j.s.travel_max:
+                    self._emit(EventCode.GENERIC, i, (), f"limits j{i}: travel not set, skipped", Severity.WARNING)
+                    continue
+                old, old_offset = j.limits, j.servo_offset
                 j.limits = (j.s.travel_min, j.s.travel_max)
+                note = ""
+                if j.d.model == HLS and j.s.offset is not None and j.s.offset != old_offset:
+                    self._set_servo_offset(j, j.s.offset)
+                    note = f", offset {old_offset} -> {j.s.offset}"
                 self._emit(
                     EventCode.GENERIC,
                     i,
                     (),
-                    f"limits j{i}: {old[0]}..{old[1]} -> {j.limits[0]}..{j.limits[1]} written and verified",
+                    f"limits j{i}: {old[0]}..{old[1]} -> {j.limits[0]}..{j.limits[1]}{note} written and verified",
                 )
             return
         raise _ParseError("usage: limits check | limits write <joint|all>")
+
+    def _set_servo_offset(self, j: Joint, offset: int) -> None:
+        """The servo reports its raw position plus the offset: every reading moves with it."""
+        delta = offset - j.servo_offset
+        j.servo_offset = offset
+        j.position += delta
+        j.goal += delta
+        j.target += delta
+
+    def _cmd_zero(self, args: list[str]) -> None:
+        j = self._joint_arg(args)
+        if j is None:
+            return
+        i = j.d.servo_id
+        if j.d.model != HLS:
+            self._refuse(
+                f"zero {i} refused: the SCS0009 has no position offset; a travel across its 1023/0 seam needs the "
+                "horn re-seated (README: Travel across the seam)"
+            )
+            return
+        before, old = round(j.position), j.servo_offset
+        written = center_offset(old, before)
+        j.limits = (0, 0)  # multi-turn, as the firmware writes it
+        self._set_servo_offset(j, written)
+        delta = round(j.position) - before
+        s = replace(j.s, offset=written)
+        kept = shift_for_offset(s, delta, POSITION_MAX[HLS])
+        j.s = s
+        if kept and s.travel_min < s.travel_max:
+            detail = f"travel now {s.travel_min}..{s.travel_max}, servo endpoints moved with it"
+        elif kept:
+            detail = "no travel stored yet"
+        else:
+            detail = "the old travel would cross the seam: travel and servo endpoints cleared"
+        self._emit(
+            EventCode.GENERIC,
+            i,
+            (),
+            f"zero j{i}: offset {old} -> {written}, position {before} -> {round(j.position)}; {detail} "
+            "(multi-turn until `limits write`)",
+            Severity.INFO if kept and s.travel_min < s.travel_max else Severity.WARNING,
+        )
+        self._emit(
+            EventCode.SETTING_CHANGED,
+            i,
+            (),
+            f"joint {i}: offset {written}; next: measure the travel (`set {i} travel`), `save`, `limits write {i}`, "
+            "power-cycle the servo, calibrate",
+        )
 
     def _cmd_sweep(self, args: list[str]) -> None:
         j = self._joint_arg(args)
