@@ -4,9 +4,10 @@
   import { run } from '../lib/commands';
   import { confirm } from '../lib/confirm.svelte';
   import { jointViews, offsetOf, travelMargin, travelOf, type JointView } from '../lib/joints.svelte';
-  import { EventCode, MODEL_HLS, type DeviceEvent } from '../lib/protocol';
+  import { EventCode, MODEL_HLS, MODEL_SCS, type DeviceEvent } from '../lib/protocol';
+  import { positionCenter, seamJump, seamMargins } from '../lib/seam';
   import { app } from '../lib/state.svelte';
-  import { fmt, modelShort } from '../lib/units';
+  import { fmt, modelShort, stepsToDeg } from '../lib/units';
 
   const joints = $derived(jointViews());
   const armed = $derived(app.armedCount > 0);
@@ -57,6 +58,7 @@
     if (r.ok) {
       const { [j.info.servo_id]: _, ...rest } = drafts;
       drafts = rest;
+      clearSeam(j.info.servo_id);
     }
   }
   function resetToDefault(j: JointView) {
@@ -78,8 +80,47 @@
       const { [id]: _, ...rest } = drafts;
       drafts = rest;
       limitRows = null;
+      lastPos = {};  // the reading jumped with the offset, not across the seam
+      clearSeam(id);
     }
   }
+
+  // ---- seam (where the reading wraps: SCS 1023/0, HLS 4095/0)
+  // Crossings seen while monitoring: an HLS joint is zeroed, an SCS horn re-seated.
+  let lastPos: Record<number, number> = {};
+  let seamCrossed = $state<Record<number, boolean>>({});
+  $effect(() => {
+    if (!monitorOn) {
+      lastPos = {};
+      return;
+    }
+    for (const j of joints) {
+      const pos = livePosition(j);
+      if (pos === null) continue;
+      const id = j.info.servo_id;
+      const prev = lastPos[id];
+      lastPos[id] = pos;
+      if (prev !== undefined && seamJump(prev, pos, j.info.model)) seamCrossed = { ...seamCrossed, [id]: true };
+    }
+  });
+  function clearSeam(id: number) {
+    const { [id]: _, ...rest } = seamCrossed;
+    seamCrossed = rest;
+  }
+  // Degrees between each end of the travel and the seam; warn below 10 deg.
+  function seamDeg(j: JointView): { low: number; high: number } | null {
+    const d = draftOf(j);
+    if (d.min >= d.max) return null;
+    const m = seamMargins(d.min, d.max, j.info.model);
+    return { low: stepsToDeg(j.info, m.low), high: stepsToDeg(j.info, m.high) };
+  }
+  // SCS0009 centring aid: live reading against the middle of the range, in degrees.
+  let centering = $state(false);
+  async function toggleCentering() {
+    centering = !centering;
+    if (centering && !monitorOn) await run('monitor on', { quiet: true });
+  }
+  const scsJoints = $derived(joints.filter((j) => j.info.model !== MODEL_HLS));
 
   // ---- limits
   let limitRows = $state<DeviceEvent[] | null>(null);
@@ -98,6 +139,7 @@
     });
     if (!ok) return;
     await run(`limits write ${target}`);
+    lastPos = {};  // a written HLS offset moves the reading
     await checkLimits();
   }
   async function storeOffset(id: number, offset: number) {
@@ -170,10 +212,34 @@
         <h2>Travel</h2>
         <button disabled={armed} onclick={() => run(`monitor ${monitorOn ? 'off' : 'on'}`, { quiet: true })}>Monitor {monitorOn ? 'off' : 'on'}</button>
         <button class="primary" disabled={armed} onclick={() => run('save')}>Save to NVS</button>
+        <button class:primary={centering} disabled={armed || scsJoints.length === 0} onclick={toggleCentering} title="SCS0009: re-seat a horn so the joint's middle reads 512">Center {centering ? 'off' : 'on'}</button>
       </div>
-      <p class="hint">This robot's mechanical limits, in servo steps. They are stored with the calibration, so a backup carries them to another session or board. To measure: torque off, monitor on, push the finger to each end by hand and press Min / Max (keeps ~15 SCS / ~50 HLS steps inside the end), then Set. An HLS travel across the 4095/0 seam: hold the joint mid-travel and Zero it first.</p>
+      <p class="hint">This robot's mechanical limits, in servo steps. They are stored with the calibration, so a backup carries them to another session or board. To measure: torque off, monitor on, push the finger to each end by hand and press Min / Max (keeps ~15 SCS / ~50 HLS steps inside the end), then Set. An HLS travel across the 4095/0 seam: hold the joint mid-travel and Zero it first. An SCS travel across 1023/0 cannot be fixed in software (no feedback beyond the seam): re-seat the horn with Center on.</p>
+      {#if Object.keys(seamCrossed).length}
+        <div class="notice">
+          Crossed the seam while monitoring:
+          {#each joints.filter((j) => seamCrossed[j.info.servo_id]) as j (j.info.servo_id)}
+            <span class="pill err">{j.info.servo_id} {j.info.name}: {j.info.model === MODEL_HLS ? 'hold it mid-travel and Zero it' : 're-seat the horn (Center on)'}
+              <button class="small ghost" onclick={() => clearSeam(j.info.servo_id)} title="clear">×</button></span>
+          {/each}
+        </div>
+      {/if}
+      {#if centering}
+        <p class="hint">SCS0009: hold the joint in the middle of its travel, take the horn off and put it back on the spline where the reading is closest to {positionCenter(MODEL_SCS)} (within ±5°), then measure the travel again. The whole travel must fit inside 0..1023 (about 300°).</p>
+        <div class="center-grid">
+          {#each scsJoints as j (j.info.servo_id)}
+            {@const pos = livePosition(j)}
+            {@const err = pos === null ? null : stepsToDeg(j.info, pos - positionCenter(j.info.model))}
+            <div class="center-tile" class:ok={err !== null && Math.abs(err) <= 5}>
+              <span class="muted">{j.info.servo_id} {j.info.name}</span>
+              <span class="big">{err === null ? '—' : `${err > 0 ? '+' : ''}${fmt(err, 1)}°`}</span>
+              <span class="muted">reads {pos ?? '—'} · centre {positionCenter(j.info.model)}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
       <table>
-        <thead><tr><th>id</th><th>name</th><th>live</th><th>min</th><th></th><th>max</th><th></th><th></th><th>offset</th></tr></thead>
+        <thead><tr><th>id</th><th>name</th><th>live</th><th>min</th><th></th><th>max</th><th></th><th></th><th title="degrees from each end of the travel to the seam">seam</th><th>offset</th></tr></thead>
         <tbody>
           {#each joints as j (j.info.servo_id)}
             {@const d = draftOf(j)}
@@ -191,6 +257,18 @@
                   <button class="small primary" disabled={armed || !dirty(j)} onclick={() => applyTravel(j)}>Set</button>
                   <button class="small ghost" disabled={armed} onclick={() => resetToDefault(j)} title={`config.h: ${j.info.travel_min}..${j.info.travel_max}`}>Default</button>
                 </div>
+              </td>
+              <td>
+                {#if seamCrossed[j.info.servo_id]}
+                  <span class="pill err">crossed</span>
+                {:else}
+                  {@const m = seamDeg(j)}
+                  {#if m}
+                    <span class="num" class:warn-text={Math.min(m.low, m.high) < 10} title={`${fmt(m.low)}° below min, ${fmt(m.high)}° above max to the seam`}>{fmt(m.low)}°·{fmt(m.high)}°</span>
+                  {:else}
+                    <span class="muted">—</span>
+                  {/if}
+                {/if}
               </td>
               <td>
                 {#if j.info.model === MODEL_HLS}
@@ -335,5 +413,28 @@
   }
   .err-text {
     color: var(--err);
+  }
+  .warn-text {
+    color: var(--warn);
+  }
+  .center-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+  }
+  .center-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .center-tile.ok {
+    border-color: var(--ok);
+  }
+  .center-tile .big {
+    font-size: 1.6em;
+    font-variant-numeric: tabular-nums;
   }
 </style>

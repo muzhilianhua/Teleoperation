@@ -1,0 +1,1 @@
+var e=360/16384;function t(e,t){return t*(e?.degrees_per_count??.02197265625)}function n(e,t){return t*e.degrees_per_step}function r(e,t=0){return e==null||!Number.isFinite(e)?`—`:e.toFixed(t)}function i(e){return e===2?`HLS`:e===1?`SCS`:`?`}export{n as a,i,t as n,r,e as t};
