@@ -243,6 +243,7 @@ class TeleopController {
   void handleHome(uint8_t servoId);
   void handleLimitsCheck();
   void handleLimitsWrite(uint8_t servoId);
+  void handleZero(uint8_t servoId);
   void handleSweep(uint8_t servoId);
   void handleSweepApply(uint8_t servoId);
   void handleReplay(const Command& command);

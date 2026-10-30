@@ -423,6 +423,7 @@ void Console::printHelp() {
       "  home <j>             multi-turn joint: glove held at pose A, fixes the turn count\n"
       "  set <j> exospan <rawA> <span> | servo <a> <b>  enter endpoints directly (dump format)\n"
       "  set <j> travel <min> <max>                 this robot's mechanical limits (then `limits write`)\n"
+      "  set <j> offset <n|none>                    HLS position offset the travel was measured with\n"
       "  set <j> vmax|amax|vsat|trk|grip <n>        per-joint speed / tracking / grip lead (0 = off)\n"
       "  set <j> ilimit <mA>                        HLS goal-current cap (0 = servo protection current)\n"
       "  set <j> itrip <%>                          HLS over-current trip, % of cap (0 = off; not saved)\n"
@@ -430,7 +431,8 @@ void Console::printHelp() {
       "  set loadtrip on|off                        firmware load trips (off: servo overload decides)\n"
       "  set supplymin|supplymax <V>, supplyms <ms> servo supply window (median voltage; 4.5..6.0 / 6.0..7.4 V, 50..1000 ms)\n"
       "  save | load | defaults | dump              NVS store / reload / reset (RAM) / export\n"
-      "  limits check | limits write <j|all>        servo angle-limit registers vs travel (disarmed)\n"
+      "  limits check | limits write <j|all>        servo angle-limit registers (+ HLS offset) vs travel (disarmed)\n"
+      "  zero <j>                                   HLS: joint held mid-travel, torque off -> reads 2048 (disarmed)\n"
       "  sweep <j> | sweep <j> apply                measure saturation speed, suggest vmax/vsat (disarmed)\n"
       "  plot <j> on | plot off                     Teleplot traces at 50 Hz\n"
       "  host on                                    framed link for the PC GUI (it sends this itself)");
@@ -475,7 +477,7 @@ void Console::printJoints() {
   controller_.snapshot(snapshot_);
   out_.printf("%s hand\n", hand::name());
   out_.println(
-      "id name           model on enc  exo span   servo A..B   travel     vmax  amax  vsat trk  ilimit/trip "
+      "id name           model on enc  exo span   servo A..B   travel     offset vmax  amax  vsat trk  ilimit/trip "
       "ready home  state  last fault");
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     const teleop::JointDefaults& d = hand::joints()[i];
@@ -505,6 +507,15 @@ void Console::printJoints() {
     } else {
       strlcpy(travel, " undefined", sizeof(travel));
     }
+    // HLS position offset the travel was measured with; none = not stored, not checked
+    char offset[8];
+    if (d.model != feetech::ServoModel::Hls3606) {
+      strlcpy(offset, "--", sizeof(offset));
+    } else if (!teleop::offsetStored(s)) {
+      strlcpy(offset, "none", sizeof(offset));
+    } else {
+      snprintf(offset, sizeof(offset), "%d", s.offset);
+    }
     // auto = single-turn, homes itself; homed / HOME! = multi-turn, needs `home <j>` at pose A
     const char* home = j.singleTurn ? (j.homed ? "auto " : "wait ") : (j.homed ? "homed" : "HOME!");
     // `?` = not identified on the bus yet / differs from config.h (cannot arm)
@@ -529,8 +540,8 @@ void Console::printJoints() {
       }
       snprintf(ilimit, sizeof(ilimit), "%s/%s", cap, trip);
     }
-    out_.printf("%2u %-14s %-5s %d  %-4s %-9s  %s  %s %5u %5u %5u %4u  %-11s %-5s %s %-6s %s\n",
-                  d.servoId, d.name, model, s.enabled, enc, exo, servo, travel, s.vmax, s.amax, s.vsat,
+    out_.printf("%2u %-14s %-5s %d  %-4s %-9s  %s  %s %6s %5u %5u %5u %4u  %-11s %-5s %s %-6s %s\n",
+                  d.servoId, d.name, model, s.enabled, enc, exo, servo, travel, offset, s.vmax, s.amax, s.vsat,
                   s.trackSteps, ilimit, j.ready ? "yes" : "no", home, jointStateToString(j.state),
                   j.lastFault == teleop::Fault::None ? "-" : teleop::faultToString(j.lastFault));
   }

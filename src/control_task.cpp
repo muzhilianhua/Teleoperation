@@ -1,6 +1,7 @@
 #include "control_task.h"
 
 #include <config_blob.h>
+#include <hls_offset.h>
 #include <esp_task_wdt.h>
 #include <stdarg.h>
 
@@ -705,6 +706,7 @@ void TeleopController::handleCommand(const Command& c) {
     case Verb::Defaults: loadDefaults(); break;
     case Verb::LimitsCheck: handleLimitsCheck(); break;
     case Verb::LimitsWrite: handleLimitsWrite(c.joint); break;
+    case Verb::Zero: handleZero(c.joint); break;
     case Verb::Sweep: handleSweep(c.joint); break;
     case Verb::SweepApply: handleSweepApply(c.joint); break;
     case Verb::Replay: handleReplay(c); break;
@@ -867,21 +869,39 @@ void TeleopController::handleLimitsCheck() {
   uint8_t mismatches = 0;
   for (const JointChannel& ch : channels_) {
     const uint8_t id = ch.def->servoId;
-    int16_t lo = 0, hi = 0;
-    if (!bus_.readAngleLimits(id, lo, hi)) {
+    const teleop::JointSettings& s = ch.settings;
+    const bool hls = bus_.model(id) == feetech::ServoModel::Hls3606;
+    // ArmInfo carries the HLS offset too; the SCS0009 has none (reads 0).
+    feetech::ArmInfo info;
+    if (!(hls ? bus_.readArmInfo(id, info) : bus_.readAngleLimits(id, info.minLimit, info.maxLimit))) {
       event({EV::LimitsRow, id, SV::Warning, {0, 0, -1}}, "limits j%u %-13s no reply", id, ch.def->name);
       continue;
     }
-    if (!teleop::travelDefined(ch.settings)) {
-      event({EV::LimitsRow, id, SV::Info, {lo, hi, -2}}, "limits j%u %-13s servo %4d..%-4d  travel undefined", id, ch.def->name, lo, hi);
+    const int16_t lo = info.minLimit, hi = info.maxLimit;
+    char offset[40] = "";
+    if (hls) {
+      if (teleop::offsetStored(s)) {
+        snprintf(offset, sizeof(offset), "  offset %d (stored %d)", info.offset, s.offset);
+      } else {
+        snprintf(offset, sizeof(offset), "  offset %d (none stored)", info.offset);
+      }
+    }
+    if (!teleop::travelDefined(s)) {
+      event({EV::LimitsRow, id, SV::Info, {lo, hi, -2, info.offset}}, "limits j%u %-13s servo %4d..%-4d  travel undefined%s", id,
+            ch.def->name, lo, hi, offset);
       continue;
     }
-    const bool match = lo == ch.settings.travelMin && hi == ch.settings.travelMax;
+    const bool limitsMatch = lo == s.travelMin && hi == s.travelMax;
+    const bool offsetMatch = !hls || !teleop::offsetStored(s) || info.offset == s.offset;
+    const bool match = limitsMatch && offsetMatch;
     mismatches += match ? 0 : 1;
-    const bool multiTurn = lo == 0 && hi == 0 && bus_.model(id) == feetech::ServoModel::Hls3606;
-    event({EV::LimitsRow, id, SV::Info, {lo, hi, match ? 1 : 0}}, "limits j%u %-13s servo %4d..%-4d  travel %4d..%-4d  %s", id, ch.def->name, lo, hi,
-            ch.settings.travelMin, ch.settings.travelMax,
-            match ? "ok" : (multiTurn ? "MISMATCH (HLS factory multi-turn)" : "MISMATCH"));
+    const bool multiTurn = lo == 0 && hi == 0 && hls;
+    const char* verdict = match ? "ok"
+                          : !offsetMatch ? "MISMATCH (offset)"
+                          : multiTurn    ? "MISMATCH (HLS multi-turn)"
+                                         : "MISMATCH";
+    event({EV::LimitsRow, id, SV::Info, {lo, hi, match ? 1 : 0, info.offset}}, "limits j%u %-13s servo %4d..%-4d  travel %4d..%-4d%s  %s", id,
+          ch.def->name, lo, hi, s.travelMin, s.travelMax, offset, verdict);
   }
   message(mismatches ? "%u mismatch(es): `limits write all` syncs them" : "all defined joints match",
           mismatches);
@@ -891,27 +911,125 @@ void TeleopController::handleLimitsWrite(uint8_t servoId) {
   for (const JointChannel& ch : channels_) {
     const uint8_t id = ch.def->servoId;
     if (servoId != 0 && id != servoId) continue;
-    if (!teleop::travelDefined(ch.settings)) {
-      event({EV::Generic, id, SV::Warning}, "limits j%u: travel undefined in config.h, skipped", id);
+    const teleop::JointSettings& s = ch.settings;
+    if (!teleop::travelDefined(s)) {
+      event({EV::Generic, id, SV::Warning}, "limits j%u: travel not set (set %u travel <min> <max>), skipped", id, id);
       continue;
     }
-    int16_t lo = 0, hi = 0;
-    if (!bus_.readAngleLimits(id, lo, hi)) {
+    const bool hls = bus_.model(id) == feetech::ServoModel::Hls3606;
+    feetech::ArmInfo info;
+    if (!(hls ? bus_.readArmInfo(id, info) : bus_.readAngleLimits(id, info.minLimit, info.maxLimit))) {
       event({EV::Generic, id, SV::Warning}, "limits j%u: no reply, skipped", id);
       continue;
     }
-    if (lo == ch.settings.travelMin && hi == ch.settings.travelMax) {
-      if (servoId != 0) message("limits j%u: already %d..%d, nothing written", id, lo, hi);
+    // No stored offset: keep whatever the servo holds.
+    const int16_t offset = hls && teleop::offsetStored(s) ? s.offset : info.offset;
+    const bool limitsMatch = info.minLimit == s.travelMin && info.maxLimit == s.travelMax;
+    if (limitsMatch && offset == info.offset) {
+      if (servoId != 0) message("limits j%u: already %d..%d, nothing written", id, info.minLimit, info.maxLimit);
       continue;  // EEPROM is only written when it differs
     }
-    const bool ok = bus_.writeAngleLimits(id, ch.settings.travelMin, ch.settings.travelMax);
-    const bool hls = bus_.model(id) == feetech::ServoModel::Hls3606;
-    event({EV::Generic, id, ok ? SV::Info : SV::Error}, "limits j%u: %d..%d -> %d..%d %s%s", id, lo, hi, ch.settings.travelMin, ch.settings.travelMax,
-            ok ? "written and verified" : "FAILED (torque must be off; check the bus)",
-            ok && hls ? "; power-cycle the servos before arming" : "");
+    const bool ok = hls ? bus_.writeHlsSetup(id, s.travelMin, s.travelMax, offset)
+                        : bus_.writeAngleLimits(id, s.travelMin, s.travelMax);
+    char offsetText[32] = "";
+    if (offset != info.offset) snprintf(offsetText, sizeof(offsetText), ", offset %d -> %d", info.offset, offset);
+    event({EV::Generic, id, ok ? SV::Info : SV::Error}, "limits j%u: %d..%d -> %d..%d%s %s%s", id, info.minLimit, info.maxLimit,
+          s.travelMin, s.travelMax, offsetText, ok ? "written and verified" : "FAILED (torque must be off; check the bus)",
+          ok && hls ? "; power-cycle the servos before arming" : "");
     if (!ok) cmdFailed_ = true;
   }
   if (servoId != 0 && channelForServo(servoId) == nullptr) refuse("no joint with servo id %u", servoId);
+}
+
+void TeleopController::handleZero(uint8_t servoId) {
+  JointChannel* ch = channelForServo(servoId);
+  if (ch == nullptr) {
+    refuse("no joint with servo id %u", servoId);
+    return;
+  }
+  if (ch->def->model != feetech::ServoModel::Hls3606) {
+    refuse("zero %u refused: the SCS0009 has no position offset; a travel across its 1023/0 seam needs the horn "
+           "re-seated (README: Travel across the seam)", servoId);
+    return;
+  }
+  if (!ch->modelOk) {
+    refuse("zero %u refused: servo model not identified or not as in config.h (run `ping`)", servoId);
+    return;
+  }
+  feetech::ArmInfo info;
+  ServoState st;
+  if (!bus_.readArmInfo(servoId, info) || !bus_.readState(servoId, st)) {
+    refuse("zero %u refused: no reply from servo %u", servoId, servoId);
+    return;
+  }
+  if (st.torqueOn) {
+    refuse("zero %u refused: torque is on", servoId);
+    return;
+  }
+  if (st.errorByte != 0 || st.status != 0) {
+    refuse("zero %u refused: servo error 0x%02X / status 0x%02X", servoId, st.errorByte, st.status);
+    return;
+  }
+
+  // Limits 0/0 (multi-turn) with the new offset, as DEX_hand_software hls-setup
+  // re-centres: stale single-turn limits must not clamp the shifted readings.
+  const int16_t before = st.position;
+  int16_t written = teleop::centerOffset(info.offset, before);
+  bool ok = bus_.writeHlsSetup(servoId, 0, 0, written);
+  ServoState after;
+  bool read = ok && bus_.readState(servoId, after);
+  bool verified = read && abs(after.position - teleop::kZeroCenter) <= teleop::kZeroTolerance;
+  if (read && !verified && abs(after.position - before) > teleop::kZeroTolerance) {
+    // It moved, but not to the centre: this servo applies the offset the other way round.
+    const int16_t mirrored = teleop::mirroredOffset(info.offset, written);
+    message("zero j%u: offset %d moved the position to %d, not %d: writing %d", servoId, written, after.position,
+            teleop::kZeroCenter, mirrored);
+    written = mirrored;
+    ok = bus_.writeHlsSetup(servoId, 0, 0, written);
+    read = ok && bus_.readState(servoId, after);
+    verified = read && abs(after.position - teleop::kZeroCenter) <= teleop::kZeroTolerance;
+  }
+  if (!ok) {
+    event({EV::Generic, servoId, SV::Error}, "zero j%u: writing offset %d FAILED (torque must be off; check the bus); "
+          "stored settings unchanged", servoId, written);
+    cmdFailed_ = true;
+    return;
+  }
+
+  teleop::JointSettings s = ch->settings;
+  s.offset = written;
+  bool kept = false;
+  if (verified) {
+    kept = teleop::shiftForOffset(s, after.position - before, feetech::modelInfo(ch->def->model).positionMax);
+  } else {
+    s.travelMin = s.travelMax = 0;
+    s.servoA = s.servoB = 0;
+    s.enabled = false;
+  }
+  if (teleop::validateJoint(s, *ch->def, config::kEncoderCount) != nullptr) {
+    s.travelMin = s.travelMax = 0;  // never keep settings the rest of the firmware would refuse
+    s.servoA = s.servoB = 0;
+    s.enabled = false;
+    kept = false;
+  }
+  ch->settings = s;
+  applyRuntimeParams(*ch);
+
+  if (!verified) {
+    event({EV::Generic, servoId, SV::Warning}, "zero j%u: offset %d -> %d written, but the position reads %d, not ~%d: "
+          "power-cycle the servo and check it. Travel and servo endpoints cleared (multi-turn until `limits write`)",
+          servoId, info.offset, written, read ? after.position : -1, teleop::kZeroCenter);
+  } else if (kept && teleop::travelDefined(s)) {
+    event({EV::Generic, servoId}, "zero j%u: offset %d -> %d, position %d -> %d; travel now %d..%d, servo endpoints moved "
+          "with it (multi-turn until `limits write`)", servoId, info.offset, written, before, after.position,
+          s.travelMin, s.travelMax);
+  } else {
+    event({EV::Generic, servoId, SV::Warning}, "zero j%u: offset %d -> %d, position %d -> %d; %s (multi-turn until "
+          "`limits write`)", servoId, info.offset, written, before, after.position,
+          kept ? "no travel stored yet" : "the old travel would cross the seam: travel and servo endpoints cleared");
+  }
+  event({EV::SettingChanged, servoId}, "joint %u: offset %d; next: measure the travel (`set %u travel`), `save`, "
+        "`limits write %u`, power-cycle the servo, calibrate", servoId, s.offset, servoId, servoId);
 }
 
 // ---- speed sweep --------------------------------------------------------------
@@ -1211,6 +1329,9 @@ const char* TeleopController::armJoint(uint8_t index, const ServoState& st, uint
     if (!bus_.readArmInfo(id, info)) return "no reply reading the HLS setup registers";
     if (info.minLimit == 0 && info.maxLimit == 0) {
       return "HLS angle limits are 0/0 (factory multi-turn): run `limits write <j>`, then power-cycle";
+    }
+    if (teleop::offsetStored(ch.settings) && info.offset != ch.settings.offset) {
+      return "HLS position offset differs from the stored one (`limits check`): run `limits write <j>`, then power-cycle";
     }
     if (info.minLimit > ch.settings.travelMin || info.maxLimit < ch.settings.travelMax) {
       return "HLS angle limits do not cover the travel: run `limits write <j>`, then power-cycle";
