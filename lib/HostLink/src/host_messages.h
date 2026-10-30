@@ -184,7 +184,7 @@ bool decodeTelemetry(const uint8_t* in, size_t length, Telemetry& t);
 
 // ---- device -> host: SLOW_STATUS --------------------------------------------
 
-struct SlowJoint {  // 32 B
+struct SlowJoint {  // 36 B
   uint8_t enabled = 0;
   uint8_t encoderIndex = 0xFF;
   uint16_t exoRef = 0;
@@ -201,6 +201,8 @@ struct SlowJoint {  // 32 B
   uint8_t detectedModel = 0;
   uint16_t effectiveCurrentMa = 0;
   uint32_t jumpRejects = 0;
+  int16_t travelMin = 0;  // this robot's stored travel (HELLO has config.h's default)
+  int16_t travelMax = 0;
 };
 
 struct SlowEncoder {  // 11 B

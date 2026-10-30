@@ -191,6 +191,8 @@ size_t encodeSlowStatus(const SlowStatus& s, uint8_t* out, size_t capacity) {
     w.u8(j.detectedModel);
     w.u16(j.effectiveCurrentMa);
     w.u32(j.jumpRejects);
+    w.i16(j.travelMin);
+    w.i16(j.travelMax);
   }
   w.u8(s.encoderCount);
   for (uint8_t i = 0; i < s.encoderCount; ++i) {
@@ -263,6 +265,8 @@ bool decodeSlowStatus(const uint8_t* in, size_t length, SlowStatus& s) {
     j.detectedModel = r.u8();
     j.effectiveCurrentMa = r.u16();
     j.jumpRejects = r.u32();
+    j.travelMin = r.i16();
+    j.travelMax = r.i16();
   }
   s.encoderCount = r.u8();
   if (!r.ok() || s.encoderCount > kMaxEncoders) return false;

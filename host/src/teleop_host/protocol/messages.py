@@ -436,8 +436,10 @@ class SlowJoint:
     detected_model: int = 0
     effective_current_ma: int = 0
     jump_rejects: int = 0
+    travel_min: int = 0  # this robot's stored travel (HELLO has config.h's default)
+    travel_max: int = 0
 
-    _S = struct.Struct("<BBHihhHHHHHHBBHI")
+    _S = struct.Struct("<BBHihhHHHHHHBBHIhh")
 
 
 @dataclass(slots=True)
@@ -551,6 +553,8 @@ class SlowStatus:
                 j.detected_model,
                 j.effective_current_ma,
                 j.jump_rejects,
+                j.travel_min,
+                j.travel_max,
             )
         out += bytes([len(self.encoders)])
         for e in self.encoders:

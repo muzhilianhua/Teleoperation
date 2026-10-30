@@ -81,7 +81,7 @@ protocol u8 | firmware str8 | controlHz u16 | degreesPerCount f32 | encoderCount
 minIlimitMa u16 | maxIlimitMa u16 | minItripPct u8 | maxItripPct u8 | defaultItripPct u8
 minExoSpanCounts i32 | maxExoSpanCounts i32
 jointCount u8, then per joint:
-  servoId u8 | model u8 | travelMin i16 | travelMax i16 | vmax u16 | vsat u16 | amax u16
+  servoId u8 | model u8 | travelMin i16 | travelMax i16 (config.h default) | vmax u16 | vsat u16 | amax u16
   maxSpeed u16 | encoderDefault u8 | enabledDefault u8 | stepScale f32 | degreesPerStep f32 | name str8
 name tables, each count u8 + str8 per entry: faults, joint states, event codes, servo models
 hand u8 (0 unknown, 1 right, 2 left: the GPIO4 strap) | boardId str8 (MAC, hex)
@@ -139,7 +139,7 @@ per joint: state u8 | fault u8 | flags u16 | encRaw u16
 
 The control task encodes every cycle into a 16-deep queue without waiting. A slow host loses samples, which sets `handFlags` bit 3; the control loop never slows down.
 
-### SLOW_STATUS (530 B for 9 joints and 9 encoders)
+### SLOW_STATUS (566 B for 9 joints and 9 encoders)
 
 ```
 global:   leadMs f32 | minCutoffHz f32 | beta f32 | jumpDeg f32 | gripLoadPct f32 | loadTrip u8
@@ -152,14 +152,15 @@ link:     droppedEvents u32 | droppedTelemetry u32 | rxCrcErrors u32 | rxMalform
 monitor:  on u8 | okMask u16 | jointCount u8 | position i16 x jointCount
 joints:   enabled u8 | encoderIndex u8 (0xFF none) | exoRef u16 | exoB i32 | servoA i16 | servoB i16
           vmax u16 | amax u16 | vsat u16 | trk u16 | grip u16 | ilimit u16 | itrip u8
-          detectedModel u8 | effectiveCurrentMa u16 | jumpRejects u32            (32 B each)
+          detectedModel u8 | effectiveCurrentMa u16 | jumpRejects u32
+          travelMin i16 | travelMax i16  (this robot's stored travel)              (36 B each)
 encoderCount u8, then per encoder:
           address u8 | state u8 (0 online, 1 no magnet, 2 offline) | valid u8 | angle u16
           agc u8 | magnetOk u8 | errors u32                                       (11 B each)
 supply:   minV f32 | maxV f32 | ms u16                                           (10 B)
 ```
 
-The `supply` block (the hand's supply window, `set supplymin|supplymax|supplyms`) is appended at the end: firmware from before it sends 520 B, and a host reads the window as absent (fixed 5.5–6.5 V, 200 ms).
+The `supply` block (the hand's supply window, `set supplymin|supplymax|supplyms`) is appended at the end: firmware from before it (and before the per-joint travel) sends 520 B, and a host reads the window as absent (fixed 5.5–6.5 V, 200 ms).
 
 ### EVENT codes
 

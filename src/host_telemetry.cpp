@@ -209,6 +209,8 @@ void fillSlowStatus(const Snapshot& s, hostlink::SlowStatus& out) {
     w.detectedModel = static_cast<uint8_t>(j.detectedModel);
     w.effectiveCurrentMa = toU16(j.currentLimitMa);
     w.jumpRejects = j.jumpRejects;
+    w.travelMin = st.travelMin;
+    w.travelMax = st.travelMax;
   }
   out.encoderCount = config::kEncoderCount;
   for (uint8_t i = 0; i < config::kEncoderCount; ++i) {
