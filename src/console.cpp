@@ -564,6 +564,10 @@ void Console::printStats() {
   out_.printf("encoder pass avg %lu us max %lu us, skew max %lu us\n",
                 (unsigned long)e.averageCycleUs(), (unsigned long)e.maxCycleUs,
                 (unsigned long)e.maxSkewUs);
+  const EncoderSyncStats& w = snapshot_.encoderSync;
+  out_.printf("encoder wait last %lu us max %lu us, late %lu cycles, stalls %lu (last %lu ms, max %lu ms)\n",
+                (unsigned long)w.lastWaitUs, (unsigned long)w.maxWaitUs, (unsigned long)w.late,
+                (unsigned long)w.stalls, (unsigned long)w.lastStallMs, (unsigned long)w.maxStallMs);
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) {
     const JointSnapshot& j = snapshot_.joints[i];
     if (j.settings.enabled && j.jumpRejects > 0) {

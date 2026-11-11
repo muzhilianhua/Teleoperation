@@ -55,7 +55,7 @@ const char* jointStateToString(JointState state) {
   return "?";
 }
 
-TeleopController::TeleopController(ServoBus& bus, FeetechPort& port, AS5048BGroup& encoders)
+TeleopController::TeleopController(ServoBus& bus, FeetechPort& port, EncoderSampler& encoders)
     : bus_(bus), port_(port), encoders_(encoders) {
   global_ = config::kGlobalDefaults;
 }
@@ -317,7 +317,11 @@ void TeleopController::cycle() {
   // nowMs - lastGoodReadMs underflow and read as a stale (lost) bus.
   const uint32_t nowMs = millis();
 
-  encoders_.sample(cycle_ % config::kFullEncoderReadEvery == 0);
+  // The pass runs on the encoder task while the servo bus is read here;
+  // neither step uses the other's result.
+  encoders_.trigger(cycle_ % config::kFullEncoderReadEvery == 0);
+  readServos(nowMs);
+  takeEncoderPass(nowMs);
   for (JointChannel& ch : channels_) {
     // Tracked whether enabled or not: calibration and homing need an
     // unbroken position history, and multi-turn joints lose it on a gap.
@@ -329,18 +333,42 @@ void TeleopController::cycle() {
     }
   }
 
-  readServos(nowMs);
   drainReplayChunks();
   stepReplay(nowMs);
   for (uint8_t i = 0; i < teleop::kMaxJoints; ++i) stepJoint(i, dt, nowMs);
   writeGoals(nowMs);
 }
 
+void TeleopController::takeEncoderPass(uint32_t nowMs) {
+  const uint32_t t0 = micros();
+  encoderFresh_ = encoders_.take(encoderPass_, pdMS_TO_TICKS(config::kEncoderWaitMs));
+  EncoderSyncStats& s = encoderSync_;
+  s.lastWaitUs = micros() - t0;
+  if (s.lastWaitUs > s.maxWaitUs) s.maxWaitUs = s.lastWaitUs;
+  if (!encoderFresh_) {
+    ++s.late;
+    if (!encoderLate_) {
+      encoderLate_ = true;
+      encoderLateSinceMs_ = nowMs;
+    }
+    return;
+  }
+  if (!encoderLate_) return;
+  encoderLate_ = false;
+  const uint32_t stallMs = nowMs - encoderLateSinceMs_;
+  if (stallMs < config::kEncoderStallReportMs) return;
+  ++s.stalls;
+  s.lastStallMs = stallMs;
+  if (stallMs > s.maxStallMs) s.maxStallMs = stallMs;
+  event({EV::Generic, 0, SV::Warning}, "encoder bus: no sample for %lu ms (I2C stall), back now",
+        (unsigned long)stallMs);
+}
+
 bool TeleopController::encoderSample(uint8_t index, uint16_t& raw) const {
-  if (index >= encoders_.count()) return false;
-  const AS5048BChannel& ch = encoders_.channel(index);
-  if (ch.state != AS5048BChannelState::Online || ch.lastStatus != AS5048BStatus::Ok) return false;
-  raw = ch.reading.angle;
+  if (!encoderFresh_ || index >= config::kEncoderCount) return false;
+  const EncoderSummary& e = encoderPass_.channels[index];
+  if (e.state != AS5048BChannelState::Online || !e.readOk) return false;
+  raw = e.angle;
   return true;
 }
 
@@ -689,7 +717,8 @@ void TeleopController::handleCommand(const Command& c) {
       memset(jitterHistogram_, 0, sizeof(jitterHistogram_));
       lastWakeUs_ = 0;
       port_.clearStats();
-      encoders_.clearStats();
+      encoders_.requestClearStats();
+      encoderSync_ = EncoderSyncStats();
       for (JointChannel& ch : channels_) ch.jumpRejects = 0;
       message("statistics cleared");
       break;
@@ -1746,18 +1775,9 @@ void TeleopController::publish() {
   }
   s.timing = timing_;
   s.port = port_.stats();
-  s.encoderCycle = encoders_.stats();
-  for (uint8_t i = 0; i < config::kEncoderCount && i < encoders_.count(); ++i) {
-    const AS5048BChannel& ch = encoders_.channel(i);
-    EncoderSummary& e = s.encoders[i];
-    e.address = ch.encoder->address();
-    e.state = ch.state;
-    e.valid = ch.valid;
-    e.angle = ch.reading.angle;
-    e.agc = ch.reading.agc;
-    e.magnetOk = ch.reading.diag.magnetOk();
-    e.errors = ch.errorCount;
-  }
+  s.encoderCycle = encoderPass_.cycle;
+  s.encoderSync = encoderSync_;
+  for (uint8_t i = 0; i < config::kEncoderCount; ++i) s.encoders[i] = encoderPass_.channels[i];
 
   portENTER_CRITICAL(&mux_);
   shared_ = s;

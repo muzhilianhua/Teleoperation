@@ -54,6 +54,15 @@ constexpr uint32_t kServoStaleMs = 50;
 constexpr uint32_t kServoCommStaleMs = 100;
 constexpr uint8_t kControlCore = 1;
 constexpr uint8_t kConsoleCore = 0;
+// Encoder task (see src/encoder_task.h): above the console on its core.
+constexpr uint8_t kEncoderCore = 0;
+constexpr uint8_t kEncoderPriority = 5;
+// The control task waits at most this long (1 ms ticks: 3-4 ms) for the
+// encoder pass it triggered; a full pass of 9 encoders takes ~3 ms and runs
+// while the servos are read, so a healthy bus is never late.
+constexpr uint32_t kEncoderWaitMs = 4;
+// A late encoder bus lasting this long is reported once it is back.
+constexpr uint32_t kEncoderStallReportMs = 100;
 
 // ---- Joint tables: one entry per hand servo, one table per hand -----------
 // Both hands have the same servo ids and models; mirroring needs no table

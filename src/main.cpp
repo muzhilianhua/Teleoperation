@@ -14,6 +14,7 @@
 #include "config.h"
 #include "console.h"
 #include "control_task.h"
+#include "encoder_task.h"
 #include "hand.h"
 
 namespace {
@@ -39,9 +40,10 @@ static_assert(sizeof(rightEncoders) / sizeof(rightEncoders[0]) == config::kEncod
 char encoderNames[config::kEncoderCount][4];  // "E08": the AS5048BGroup keeps the pointers
 
 AS5048BGroup encoderGroup;
+EncoderSampler encoderSampler(encoderGroup);
 FeetechPort servoPort(Serial1);
 FeetechMixedBus servoBus(servoPort);
-TeleopController controller(servoBus, servoPort, encoderGroup);
+TeleopController controller(servoBus, servoPort, encoderSampler);
 Console console(controller);
 
 }  // namespace
@@ -80,10 +82,11 @@ void setup() {
   Serial.printf("[boot] task watchdog %lu s: %s\n", (unsigned long)config::kWatchdogTimeoutS,
                 esp_err_to_name(wdt));
 
-  if (!controller.begin()) {
+  if (!encoderSampler.begin() || !controller.begin()) {
     Serial.println("[boot] FATAL: could not create control queues");
     for (;;) delay(1000);
   }
+  encoderSampler.startTask();
   controller.startTask();
   console.startTask();
 }

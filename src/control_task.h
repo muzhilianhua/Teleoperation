@@ -4,15 +4,16 @@
 // joint off; hand-level faults switch everything off. Also owns arming, safety
 // supervision and the settings (calibration) store.
 //
-// Only this task touches the servo bus, the encoder bus and NVS. The console
-// talks to it through a command queue (in) and a message queue plus snapshot
-// (out), so nothing on the control core ever blocks on USB.
+// Only this task touches the servo bus and NVS; it triggers each encoder pass
+// on the encoder task (core 0) and waits a bounded time for it, so a hung I2C
+// bus delays samples instead of the loop. The console talks to it through a
+// command queue (in) and a message queue plus snapshot (out), so nothing on
+// the control core ever blocks on USB.
 
 #pragma once
 
 #include <Arduino.h>
 #include <stdarg.h>
-#include <AS5048BGroup.h>
 #include <command_parser.h>
 #include <feetech_port.h>
 #include <grip_limiter.h>
@@ -27,6 +28,7 @@
 #include <supervisor.h>
 
 #include "config.h"
+#include "encoder_task.h"
 
 // Sweep: the joint is armed alone and driven by the speed sweep, not the glove.
 // Replay: armed and driven by taught motion streamed from the host, not the glove.
@@ -72,14 +74,14 @@ struct TimingStats {
   uint32_t averageExecUs() const { return cycles ? static_cast<uint32_t>(totalExecUs / cycles) : 0; }
 };
 
-struct EncoderSummary {
-  uint8_t address = 0;
-  AS5048BChannelState state = AS5048BChannelState::Offline;
-  bool valid = false;
-  uint16_t angle = 0;
-  uint8_t agc = 0;
-  bool magnetOk = false;
-  uint32_t errors = 0;
+// Control side of the encoder task: passes that missed the wait.
+struct EncoderSyncStats {
+  uint32_t late = 0;        // cycles without the triggered pass (joints saw no sample)
+  uint32_t lastWaitUs = 0;  // time spent waiting for the pass
+  uint32_t maxWaitUs = 0;
+  uint32_t stalls = 0;      // late runs of kEncoderStallReportMs or more
+  uint32_t lastStallMs = 0;
+  uint32_t maxStallMs = 0;
 };
 
 struct JointSnapshot {
@@ -131,12 +133,13 @@ struct Snapshot {
   TimingStats timing;
   FeetechPortStats port;
   AS5048BCycleStats encoderCycle;
+  EncoderSyncStats encoderSync;
   EncoderSummary encoders[config::kEncoderCount];
 };
 
 class TeleopController {
  public:
-  TeleopController(ServoBus& bus, FeetechPort& port, AS5048BGroup& encoders);
+  TeleopController(ServoBus& bus, FeetechPort& port, EncoderSampler& encoders);
 
   // Call from setup() after hand::select(): binds this hand's joint table,
   // creates queues, arms the E-stop interrupt, loads the stored settings,
@@ -229,6 +232,7 @@ class TeleopController {
   void run();
   void cycle();
   void updateTiming(uint32_t wakeUs);
+  void takeEncoderPass(uint32_t nowMs);
   void processEncoder(JointChannel& ch, float dt, uint32_t nowMs);
   bool encoderSample(uint8_t index, uint16_t& raw) const;
   void readServos(uint32_t nowMs);
@@ -288,7 +292,12 @@ class TeleopController {
 
   ServoBus& bus_;
   FeetechPort& port_;
-  AS5048BGroup& encoders_;
+  EncoderSampler& encoders_;
+  EncoderPass encoderPass_;   // latest pass taken by this task
+  bool encoderFresh_ = false; // encoderPass_ answers this cycle's trigger
+  bool encoderLate_ = false;
+  uint32_t encoderLateSinceMs_ = 0;
+  EncoderSyncStats encoderSync_;
 
   QueueHandle_t commands_ = nullptr;
   QueueHandle_t messages_ = nullptr;
