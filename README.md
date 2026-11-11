@@ -273,7 +273,7 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 | `status` | Armed count, last hand-level fault, one line per enabled or armed joint, global parameters. Each joint line shows state, exo, target, goal, sent goal, grip lead (`*` = contact), commanded speed (steps/s), and servo position, torque, load, current with the estimated supply current (HLS, `2700mA(~350 in)`), voltage and temperature |
 | `joints` | All 9 joints: model (`?` = not identified / mismatch), enabled, encoder, exo span, servo endpoints, travel, `vmax`/`amax`/`vsat`/`trk`, `ilimit/trip` (HLS: cap, `prot` = protection current / `itrip` %, `off`), ready, state, last fault |
 | `enc` | All encoder channels with state, AGC, magnet flags, errors and the joint each one drives |
-| `stats [reset]` | Loop jitter (max, p99), execution time, servo bus and encoder statistics, jump-guard rejections |
+| `stats [reset]` | Loop jitter (max, p99), execution time, servo bus and encoder statistics (encoder wait, late cycles, I2C stalls), jump-guard rejections |
 | `monitor on\|off` | 10 Hz rows: 9 encoder angles and 9 servo positions, polling one servo per cycle. Disarmed only |
 | `ping` | Identify every hand servo (model, firmware) and compare with `config.h`. Disarmed only |
 | `arm` | Torque on for every enabled joint not yet armed. All must be ready |
@@ -320,6 +320,13 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 - A goal is written only if that joint's last good read is at most 50 ms old and showed torque on: a goal write to a disarmed SCS0009 would switch its torque on by itself.
 - All goals go out in one SYNC_WRITE.
 - Arming 9 joints at once takes about 22 ms, which counts one overrun in `stats`.
+
+**Encoder reads.**
+
+- The encoders are read on their own task (core 0). Each control cycle triggers one pass (angle only; AGC and diagnostics every 10th), reads the servos meanwhile, then waits at most 4 ms for the pass.
+- A late pass counts as no sample for every encoder: the joints go to HOLD as on encoder loss, and the loop keeps running. This guards against the ESP32 I2C driver blocking for about 1 s when the bus hangs (seen with no glove, where only the weak internal pull-ups hold SDA/SCL), which used to trip the 2 s task watchdog.
+- A stall of 100 ms or more is reported once the bus is back; `stats` shows the wait, late cycles and stalls.
+- A stall longer than 100 ms loses multi-turn tracking: home those joints again, as after an unplugged encoder.
 
 **Arming sequence, per joint.** Measured SCS0009 behaviour from servo_bringup, plus DEX_hand_software's HLS3606 checks:
 1. The servo was identified as the model in `config.h`.
@@ -439,6 +446,7 @@ lib/TeleopCore/           pure C++, host-tested:
   jump_guard / one_euro / rate_limiter
   replay_buffer             ring of streamed replay frames
 src/control_task.*        100 Hz loop on core 1: per-joint states, reads, arming, sweep, settings
+src/encoder_task.*        encoder passes on core 0, triggered and awaited (bounded) by the control loop
 src/config_store.*        Preferences (NVS) read/write
 src/console.*             USB console on core 0: text commands, or the framed host link after `host on`
 src/console_out.*         console output sink (text, or LOG frames in host mode)
