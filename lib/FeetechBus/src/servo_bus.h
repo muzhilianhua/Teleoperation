@@ -38,6 +38,11 @@ class ServoBus {
 
   // HLS limits / protection current / resolution / mode (registers 9..33).
   virtual bool readArmInfo(uint8_t id, feetech::ArmInfo& out) = 0;
+  // Control-loop tuning registers (read-only diagnostics, `regs`).
+  virtual bool readTuning(uint8_t id, feetech::ServoTuning& out) = 0;
+  // HLS3606 only: position-loop Kp / Kd in RAM (registers 50, 51). The servo
+  // reloads them from EEPROM (21, 22) at power-up; no unlock is needed.
+  virtual bool writePositionGains(uint8_t id, uint8_t kp, uint8_t kd) = 0;
 
   // The servo's own angle limits (EEPROM): a backstop that clamps goals even
   // if the firmware were wrong; on a factory HLS3606 (0/0, multi-turn) writing
@@ -45,4 +50,7 @@ class ServoBus {
   // implementation unlocks, writes, re-locks and reads back.
   virtual bool readAngleLimits(uint8_t id, int16_t& lo, int16_t& hi) = 0;
   virtual bool writeAngleLimits(uint8_t id, int16_t lo, int16_t hi) = 0;
+  // HLS3606 only: angle limits (0/0 = multi-turn allowed here) and position
+  // offset under one unlock, then verified with readArmInfo.
+  virtual bool writeHlsSetup(uint8_t id, int16_t lo, int16_t hi, int16_t offset) = 0;
 };

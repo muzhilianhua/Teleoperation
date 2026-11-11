@@ -1,8 +1,12 @@
-// Per-joint configuration: compile-time robot facts (JointDefaults) and the
-// persisted, operator-entered settings (JointSettings).
+// Per-joint configuration: compile-time robot facts and defaults
+// (JointDefaults) and the persisted, operator-entered settings (JointSettings).
 //
-// Travel limits deliberately exist only in JointDefaults so no console command
-// can widen them; everything an operator calibrates lives in JointSettings.
+// Travel (the mechanical limits) differs from robot to robot with assembly, so
+// it is a setting too: config.h only provides the default, `set <j> travel`
+// changes it (disarmed only, within the servo model's position range), and it
+// is stored, dumped and restored with the rest of the calibration. On an
+// HLS3606 the travel is read through the servo's position offset (register 31),
+// so the offset it was measured with is stored with it (`zero <j>` sets it).
 
 #pragma once
 
@@ -18,6 +22,9 @@ constexpr uint8_t kMaxJoints = 9;
 constexpr uint8_t kNoEncoder = 0xFF;
 constexpr int32_t kMinExoSpanCounts = 182;  // 4 deg
 constexpr int32_t kMaxExoSpanCounts = 3 * kEncoderCounts;  // 3 encoder turns
+// JointSettings::offset when none is stored: the servo's offset is then not
+// checked (settings from before it was stored, `defaults`, older backups).
+constexpr int16_t kOffsetUnset = INT16_MIN;
 
 // Every position, speed and step tolerance of a joint is in its servo's own
 // steps (SCS0009 ~0.293 deg, HLS3606 ~0.088 deg per step).
@@ -25,7 +32,7 @@ struct JointDefaults {
   uint8_t servoId;
   const char* name;
   feetech::ServoModel model;
-  int16_t travelMin;
+  int16_t travelMin;  // default travel; JointSettings holds the robot's own
   int16_t travelMax;
   uint16_t vmax;  // steps/s, rate-limiter ceiling
   uint16_t vsat;  // steps/s, measured capability used by the tracking check
@@ -35,6 +42,14 @@ struct JointDefaults {
 };
 
 struct JointSettings {
+  // Mechanical travel of this robot, in servo steps: the range every goal is
+  // clamped to and what `limits write` stores in the servo. min >= max = not
+  // measured yet (monitor only).
+  int16_t travelMin = 0;
+  int16_t travelMax = 0;
+  // HLS3606 only: the position offset (register 31) the travel and servo
+  // endpoints were measured with; arming refuses a servo holding another one.
+  int16_t offset = kOffsetUnset;
   bool enabled = false;
   uint8_t encoderIndex = kNoEncoder;
   // Operator side: raw encoder count at endpoint A, and endpoint B as the
@@ -59,7 +74,17 @@ struct JointSettings {
   // cut-out still acts). A bench setting: not stored in NVS or in `dump`, so
   // it is back to the default after boot, `load` or `defaults`.
   uint8_t currentTripPct = 90;
+  // HLS3606 only: position-loop gains written to the servo's RAM (registers
+  // 50, 51) at arming and whenever they are set. kGainUnset = keep the
+  // servo's own EEPROM gains (21, 22; factory P 32 D 32). Stiffness grows
+  // with Kp, and with it how close a loaded joint holds its goal.
+  uint8_t kp = 255;  // kGainUnset
+  uint8_t kd = 255;
 };
+
+constexpr uint8_t kGainUnset = 255;
+constexpr uint8_t kMaxServoGain = 254;
+inline bool gainStored(uint8_t gain) { return gain != kGainUnset; }
 
 constexpr uint16_t kMinCurrentLimitMa = 7;      // 1 unit of 6.5 mA
 constexpr uint16_t kMaxCurrentLimitMa = 13306;  // 2047 units
@@ -78,7 +103,21 @@ struct GlobalSettings {
   // Firmware load trips (75 % / 0.3 s, 80 % / 0.1 s). Off by default so a
   // grasp can load the servo; the servo's own overload protection then decides.
   bool loadTripEnabled = false;
+  // Servo supply window: the hand is switched off when the median servo
+  // voltage stays outside [supplyMinV, supplyMaxV] for supplyMs.
+  float supplyMinV = 5.5f;
+  float supplyMaxV = 6.5f;
+  uint16_t supplyMs = 200;
 };
+
+// Bounds of the supply window. SCS0009 (spec A/0): input 4-7.4 V, its own
+// under-voltage cut-out below 4 V. HLS3606 limits are not documented here.
+constexpr float kMinSupplyMinV = 4.5f;
+constexpr float kMaxSupplyMinV = 6.0f;
+constexpr float kMinSupplyMaxV = 6.0f;
+constexpr float kMaxSupplyMaxV = 7.4f;
+constexpr uint16_t kMinSupplyMs = 50;
+constexpr uint16_t kMaxSupplyMs = 1000;
 
 JointSettings defaultSettings(const JointDefaults& defaults);
 
@@ -89,7 +128,9 @@ inline float scaledSteps(const JointDefaults& d, float scsSteps) { return scsSte
 
 // Travel min >= max marks a joint whose limits have not been measured yet.
 inline bool travelDefined(const JointDefaults& d) { return d.travelMin < d.travelMax; }
+inline bool travelDefined(const JointSettings& s) { return s.travelMin < s.travelMax; }
 inline bool exoCalibrated(const JointSettings& s) { return s.exoB != 0; }
+inline bool offsetStored(const JointSettings& s) { return s.offset != kOffsetUnset; }
 bool servoCalibrated(const JointSettings& s, const JointDefaults& d);
 bool jointReady(const JointSettings& s, const JointDefaults& d, uint8_t encoderCount);
 

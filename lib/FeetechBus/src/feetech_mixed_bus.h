@@ -27,6 +27,9 @@ class FeetechMixedBus : public ServoBus {
   bool writeGoal(uint8_t id, int16_t position, float stepsPerSec) override;
 
   bool readArmInfo(uint8_t id, feetech::ArmInfo& out) override;
+  bool readTuning(uint8_t id, feetech::ServoTuning& out) override;
+  bool writePositionGains(uint8_t id, uint8_t kp, uint8_t kd) override;
+  bool writeHlsSetup(uint8_t id, int16_t lo, int16_t hi, int16_t offset) override;
   bool readAngleLimits(uint8_t id, int16_t& lo, int16_t& hi) override;
   bool writeAngleLimits(uint8_t id, int16_t lo, int16_t hi) override;
 

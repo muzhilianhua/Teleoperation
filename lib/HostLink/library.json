@@ -1,0 +1,7 @@
+{
+  "name": "HostLink",
+  "version": "0.1.0",
+  "description": "Hardware-independent host link: COBS framing, CRC16 and wire message layouts for the PC GUI",
+  "frameworks": "*",
+  "platforms": "*"
+}

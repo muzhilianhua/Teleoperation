@@ -4,32 +4,59 @@
 // joint off; hand-level faults switch everything off. Also owns arming, safety
 // supervision and the settings (calibration) store.
 //
-// Only this task touches the servo bus, the encoder bus and NVS. The console
-// talks to it through a command queue (in) and a message queue plus snapshot
-// (out), so nothing on the control core ever blocks on USB.
+// Only this task touches the servo bus and NVS; it triggers each encoder pass
+// on the encoder task (core 0) and waits a bounded time for it, so a hung I2C
+// bus delays samples instead of the loop. The console talks to it through a
+// command queue (in) and a message queue plus snapshot (out), so nothing on
+// the control core ever blocks on USB.
 
 #pragma once
 
 #include <Arduino.h>
-#include <AS5048BGroup.h>
+#include <stdarg.h>
 #include <command_parser.h>
 #include <feetech_port.h>
 #include <grip_limiter.h>
+#include <host_messages.h>
 #include <joint_config.h>
 #include <exo_tracker.h>
 #include <one_euro.h>
 #include <rate_limiter.h>
+#include <replay_buffer.h>
 #include <servo_bus.h>
 #include <speed_sweep.h>
 #include <supervisor.h>
 
 #include "config.h"
+#include "encoder_task.h"
 
 // Sweep: the joint is armed alone and driven by the speed sweep, not the glove.
-enum class JointState : uint8_t { Off, Align, Follow, Hold, Sweep };
+// Replay: armed and driven by taught motion streamed from the host, not the glove.
+enum class JointState : uint8_t { Off, Align, Follow, Hold, Sweep, Replay };
 const char* jointStateToString(JointState state);
 
 using Command = teleop::ParsedCommand;
+
+// One cycle's TELEMETRY payload, encoded by the control task so the host
+// link gets every cycle with its exact timestamp.
+struct TelemetrySample {
+  uint16_t length;
+  uint8_t bytes[hostlink::telemetrySize(hostlink::kMaxJoints)];
+};
+
+// One REPLAY_DATA chunk on its way from the console to the control task.
+struct ReplayChunkItem {
+  static constexpr uint8_t kMaxFrames = 20;
+  hostlink::ReplayChunk header;
+  int16_t values[kMaxFrames * teleop::kMaxJoints];
+};
+
+// Reply to a command posted with a host sequence number: sent after every
+// event it raised, so the host knows the command is finished.
+struct Completion {
+  uint16_t seq;
+  bool ok;  // false: refused, rejected or failed
+};
 
 struct TimingStats {
   static constexpr uint16_t kBinUs = 10;
@@ -47,14 +74,14 @@ struct TimingStats {
   uint32_t averageExecUs() const { return cycles ? static_cast<uint32_t>(totalExecUs / cycles) : 0; }
 };
 
-struct EncoderSummary {
-  uint8_t address = 0;
-  AS5048BChannelState state = AS5048BChannelState::Offline;
-  bool valid = false;
-  uint16_t angle = 0;
-  uint8_t agc = 0;
-  bool magnetOk = false;
-  uint32_t errors = 0;
+// Control side of the encoder task: passes that missed the wait.
+struct EncoderSyncStats {
+  uint32_t late = 0;        // cycles without the triggered pass (joints saw no sample)
+  uint32_t lastWaitUs = 0;  // time spent waiting for the pass
+  uint32_t maxWaitUs = 0;
+  uint32_t stalls = 0;      // late runs of kEncoderStallReportMs or more
+  uint32_t lastStallMs = 0;
+  uint32_t maxStallMs = 0;
 };
 
 struct JointSnapshot {
@@ -88,10 +115,15 @@ struct JointSnapshot {
 
 struct Snapshot {
   uint32_t cycle = 0;
+  uint32_t tUs = 0;  // micros() at this cycle's wake-up
   uint32_t uptimeMs = 0;
   uint8_t armedCount = 0;
   teleop::Fault lastHandFault = teleop::Fault::None;
   bool torqueOffConfirmed = true;
+  uint32_t droppedEvents = 0;  // events lost to a full queue
+  uint32_t droppedTelemetry = 0;  // per-cycle samples lost to a full queue
+  bool sweepActive = false;
+  hostlink::ReplayStatus replay;
   bool echo = false;
   bool monitor = false;
   teleop::GlobalSettings global;
@@ -101,27 +133,51 @@ struct Snapshot {
   TimingStats timing;
   FeetechPortStats port;
   AS5048BCycleStats encoderCycle;
+  EncoderSyncStats encoderSync;
   EncoderSummary encoders[config::kEncoderCount];
 };
 
 class TeleopController {
  public:
-  TeleopController(ServoBus& bus, FeetechPort& port, AS5048BGroup& encoders);
+  TeleopController(ServoBus& bus, FeetechPort& port, EncoderSampler& encoders);
 
-  // Call from setup(): creates queues, arms the E-stop interrupt, loads the
-  // stored settings, switches every hand servo to torque-off and pings them.
+  // Call from setup() after hand::select(): binds this hand's joint table,
+  // creates queues, arms the E-stop interrupt, loads the stored settings,
+  // switches every hand servo to torque-off and pings them.
   bool begin();
   void startTask();
 
   // Blocks up to `wait` when the queue is full (pasted dumps arrive in bursts).
-  bool post(const Command& command, TickType_t wait);
+  // seq != 0 (host link): events carry it and a Completion follows them.
+  bool post(const Command& command, TickType_t wait, uint16_t seq = 0);
+  // Same path as the BOOT button: torque off on the next control cycle.
+  // `reason` must be a string literal (it is printed later).
+  void requestEstop(const char* reason);
   void snapshot(Snapshot& out);
-  // Event text for the console; returns false when the queue is empty.
-  bool popMessage(char* buffer, size_t length);
+  // Returns false when the queue is empty. Drain events before taking a
+  // completion and again before reporting it: its events were queued first.
+  bool popEvent(hostlink::Event& event);
+  bool popCompletion(Completion& completion);
+  // Per-cycle telemetry for the host link; off (and the queue empty) by default.
+  void setTelemetryStream(bool on);
+  bool popTelemetry(TelemetrySample& sample, TickType_t wait);
+  // Replay frames from the host link; false when the queue is full (the host
+  // resends from bufferedUntil).
+  bool postReplayChunk(const ReplayChunkItem& chunk);
+  hostlink::ReplayStatus replayStatus();
 
  private:
-  struct Message {
-    char text[160];
+  struct QueuedCommand {
+    Command command;
+    uint16_t seq;
+  };
+
+  // What an event means to the host; the text is what the console prints.
+  struct EventTag {
+    hostlink::EventCode code = hostlink::EventCode::Generic;
+    uint8_t joint = 0;  // servo id, 0 = none
+    hostlink::Severity severity = hostlink::Severity::Info;
+    int32_t args[4] = {0, 0, 0, 0};
   };
 
   struct JointChannel {
@@ -176,6 +232,7 @@ class TeleopController {
   void run();
   void cycle();
   void updateTiming(uint32_t wakeUs);
+  void takeEncoderPass(uint32_t nowMs);
   void processEncoder(JointChannel& ch, float dt, uint32_t nowMs);
   bool encoderSample(uint8_t index, uint16_t& raw) const;
   void readServos(uint32_t nowMs);
@@ -190,16 +247,28 @@ class TeleopController {
   void handleHome(uint8_t servoId);
   void handleLimitsCheck();
   void handleLimitsWrite(uint8_t servoId);
+  void handleZero(uint8_t servoId);
+  void handleRegs(uint8_t servoId);
+  void reportRegs(const JointChannel& ch);
+  bool applyServoGains(const JointChannel& ch, bool report);
   void handleSweep(uint8_t servoId);
   void handleSweepApply(uint8_t servoId);
+  void handleReplay(const Command& command);
+  bool preflightReplay(uint8_t index, ServoState& state);
+  void drainReplayChunks();
+  void stepReplay(uint32_t nowMs);
+  void setReplayPhase(hostlink::ReplayPhase phase, hostlink::Severity severity, const char* text);
+  bool replayActive() const { return replayPhase_ != hostlink::ReplayPhase::Idle; }
   void stepSweep(uint8_t index, uint32_t nowMs);
   void endSweep(const char* abortReason);
   void reportSweep(uint8_t index);
   void saveConfig();
   bool loadConfig(bool atBoot);
   void loadDefaults();
+  void bindJointTable();
   void resetChannelRuntime(JointChannel& ch);
   void applyRuntimeParams(JointChannel& ch);
+  void applySupplyWindow();
   JointChannel* channelForServo(uint8_t servoId);
   uint8_t armedCount() const;
 
@@ -216,25 +285,55 @@ class TeleopController {
   float effectiveCurrentMa(const JointChannel& ch) const;
   void applyGoalCurrent(JointChannel& ch);
   void publish();
+  void postEvent(const EventTag& tag, const char* format, va_list args);
   void message(const char* format, ...) __attribute__((format(printf, 2, 3)));
+  void event(const EventTag& tag, const char* format, ...) __attribute__((format(printf, 3, 4)));
+  // A refusal / failure of the command being handled: its Completion reports failure.
+  void refuse(const char* format, ...) __attribute__((format(printf, 2, 3)));
 
   static TeleopController* instance_;
 
   ServoBus& bus_;
   FeetechPort& port_;
-  AS5048BGroup& encoders_;
+  EncoderSampler& encoders_;
+  EncoderPass encoderPass_;   // latest pass taken by this task
+  bool encoderFresh_ = false; // encoderPass_ answers this cycle's trigger
+  bool encoderLate_ = false;
+  uint32_t encoderLateSinceMs_ = 0;
+  EncoderSyncStats encoderSync_;
 
   QueueHandle_t commands_ = nullptr;
   QueueHandle_t messages_ = nullptr;
+  QueueHandle_t completions_ = nullptr;
+  QueueHandle_t telemetry_ = nullptr;
+  volatile bool telemetryOn_ = false;
+  volatile uint32_t droppedTelemetry_ = 0;
+  bool telemetryGap_ = false;
+  uint32_t cycleWakeUs_ = 0;
+  hostlink::Telemetry telemetryScratch_;
+  TelemetrySample sampleScratch_;
+  uint16_t currentSeq_ = 0;  // command being handled (control task only)
+  bool cmdFailed_ = false;
+  volatile uint32_t droppedEvents_ = 0;
   TaskHandle_t task_ = nullptr;
   portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
   Snapshot staging_;
   Snapshot shared_;
   volatile bool estopRequested_ = false;
+  const char* volatile estopReason_ = nullptr;  // nullptr: BOOT button
 
   JointChannel channels_[teleop::kMaxJoints];
   teleop::GlobalSettings global_;
   teleop::SupplySupervisor supplySupervisor_;
+
+  teleop::ReplayBuffer replay_;
+  hostlink::ReplayPhase replayPhase_ = hostlink::ReplayPhase::Idle;
+  uint32_t replayUnderruns_ = 0;
+  bool replayStarving_ = false;
+  uint32_t replayStarveSinceMs_ = 0;
+  int16_t replayFrame_[teleop::kMaxJoints] = {0};
+  QueueHandle_t replayChunks_ = nullptr;
+  ReplayChunkItem chunkScratch_;
 
   teleop::SpeedSweep sweep_;
   int8_t sweepJoint_ = -1;  // channel index while a sweep runs

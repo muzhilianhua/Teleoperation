@@ -127,6 +127,47 @@ bool FeetechMixedBus::readArmInfo(uint8_t id, feetech::ArmInfo& out) {
   return feetech::decodeArmInfo(m, r, sizeof(r), out);
 }
 
+bool FeetechMixedBus::readTuning(uint8_t id, feetech::ServoTuning& out) {
+  const ServoModel m = model(id);
+  const uint8_t length = feetech::tuningLength(m);
+  if (length == 0) return false;
+  uint8_t r[feetech::kHlsTuningLength];
+  if (!readRegisters(id, feetech::kRegTuning, length, r, nullptr)) return false;
+  return feetech::decodeTuning(m, r, length, out);
+}
+
+bool FeetechMixedBus::writePositionGains(uint8_t id, uint8_t kp, uint8_t kd) {
+  if (model(id) != ServoModel::Hls3606) return false;
+  const uint8_t gains[2] = {kp, kd};
+  return writeRegisters(id, feetech::kRegHlsKp, gains, sizeof(gains));
+}
+
+bool FeetechMixedBus::writeHlsSetup(uint8_t id, int16_t lo, int16_t hi, int16_t offset) {
+  if (model(id) != ServoModel::Hls3606) return false;
+  const ModelInfo& info = feetech::modelInfo(ServoModel::Hls3606);
+  const bool multiTurn = lo == 0 && hi == 0;
+  if (!multiTurn && (lo < 0 || hi > info.positionMax || lo >= hi)) return false;
+  if (offset < -feetech::kHlsMaxPositionOffset || offset > feetech::kHlsMaxPositionOffset) return false;
+  uint8_t torque = 0;
+  if (!readRegisters(id, feetech::kRegTorqueEnable, 1, &torque, nullptr) || torque != 0) return false;
+
+  uint8_t limits[4];
+  feetech::put16(limits, static_cast<uint16_t>(lo), info.endian);
+  feetech::put16(limits + 2, static_cast<uint16_t>(hi), info.endian);
+  uint8_t raw[2];
+  feetech::put16(raw, feetech::encodeSignMagnitude(offset, 15), info.endian);
+  const uint8_t unlock = 0;
+  const uint8_t lock = 1;
+  if (!writeRegisters(id, info.lockRegister, &unlock, 1)) return false;
+  bool written = writeRegisters(id, feetech::kRegAngleLimits, limits, sizeof(limits));
+  written = writeRegisters(id, feetech::kRegPositionOffset, raw, sizeof(raw)) && written;
+  delay(10);  // EEPROM commit before the lock write and read-back
+  const bool locked = writeRegisters(id, info.lockRegister, &lock, 1);
+  feetech::ArmInfo check;
+  return written && locked && readArmInfo(id, check) && check.minLimit == lo && check.maxLimit == hi &&
+         check.offset == offset;
+}
+
 bool FeetechMixedBus::readAngleLimits(uint8_t id, int16_t& lo, int16_t& hi) {
   const ServoModel m = model(id);
   if (m == ServoModel::Unknown) return false;

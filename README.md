@@ -22,13 +22,53 @@ Design document: <https://claude.ai/artifact/81sxWeamYJnzXBLv281o2v>
 | Function | Connection |
 |---|---|
 | MCU | ESP32-S3-WROOM-2-N32R16V DevKit |
-| Encoders | AS5048B × 9 on one I2C bus: SDA GPIO8, SCL GPIO9, 400 kHz. Addresses `0x40 0x44 … 0x60` (encoder #0–#8) burned into OTP |
+| Encoders | AS5048B × 9 on one I2C bus: SDA GPIO8, SCL GPIO9, 400 kHz. Right glove `0x08 0x0C … 0x28`, left glove `0x40 0x44 … 0x60` (encoder #0–#8) |
 | Servo bus | IDs 1–9, mixed models (see *Joints*), via the FE-URT-2 TTL port at 1 Mbps: GPIO17 (TX) → URT-2 RX, GPIO18 (RX) ← URT-2 TX, common GND |
-| Servo power | ~6 V. The supervisor switches the hand off outside 5.5–6.5 V. **Use a supply with ample current before full-hand or grasp tests**: servo_bringup recorded 6 V sag tripping every servo at once |
-| E-stop | DevKit BOOT button (GPIO0) |
+| Servo power | ~6 V. The supervisor switches the hand off when the median servo voltage stays outside 5.5–6.5 V for 200 ms (adjustable, see `set supplymin`). **Use a supply with ample current before full-hand or grasp tests**: servo_bringup recorded 6 V sag tripping every servo at once |
+| E-stop | DevKit BOOT button (GPIO0); the GUI's E-STOP stops both hands |
+| Hand strap | GPIO4: open = right hand, tied to GND = left hand (read once at boot) |
 | Console | Native USB port (`USB` connector), 115200 |
 
 > Only one master may drive the servo bus. Close the servo_bringup tools while the ESP32 is connected.
+
+## Two hands
+
+Each hand has its own board, glove, servo bus and supply, running the same firmware. The GPIO4 strap selects the hand at boot (`[boot] hand: left (GPIO4 to GND)`), and with it:
+
+- the joint table and encoder addresses (`kRightJoints` / `kLeftJoints`, `kRightEncoderAddresses` / `kLeftEncoderAddresses` in `include/config.h`);
+- the NVS key: the right hand keeps `cfg`, so calibrations stored before the second hand stay valid; the left hand uses `cfg_l`.
+
+Both hands have the same servo ids and models. The left table's travel is 0/0 until measured on the bench, with the same procedure as the right hand (*Bring-up of the rebuilt hand*). Mirroring needs no setting: calibrating A ↔ A and B ↔ B gives each joint its direction.
+
+The two hands are independent: a fault, disarm or reset of one never touches the other. Only E-stop from the GUI reaches both. `dump` starts with `# hand right|left`, and backup restore refuses the other hand's dump.
+
+## PC GUI (`host/`)
+
+Everything below can also be done from a browser GUI on the debug computer: calibration, telemetry plots, servo setup, parameters, backups, arming, E-stop, and teach and replay. Close `pio device monitor` first:
+
+```bash
+cd host && uv sync && uv run teleop-host      # opens http://127.0.0.1:8790
+uv run teleop-host --sim                      # without hardware
+```
+
+See [host/README.md](host/README.md). The GUI uses the host link protocol ([docs/host-protocol.md](docs/host-protocol.md)) on the same USB port; the text console below stays available whenever the GUI is not connected.
+
+## Teach and replay
+
+The GUI's **Teach** page records the hands while you teleoperate them and plays the motion back, on one hand or on both together.
+
+- **Record**: pick the hands, start, teleoperate as usual, add markers, stop. Every control cycle is saved to `recordings/<date-time>_<name>/`: `meta.json` plus one `right.csv` / `left.csv`, with both hands on one host time axis.
+  - `recordings/` is not in git. Archive the ones to keep, or point `teleop-host --recordings` at another folder.
+- **Replay**:
+  - *Prepare* arms the joints that followed the glove while recording and moves them slowly to the first frame.
+  - *Play* starts every selected hand together, at 0.25 to 1× speed.
+  - The host streams the recorded goals about 1 s ahead into a 256-frame buffer on each board. The board plays them on its own 100 Hz clock, through the rate limiter, the grip limiter and every safety check.
+  - At the end the joints hold the last pose until you disarm them.
+  - E-stop, a fault, or a buffer that stays empty for 0.5 s stops a replay.
+- **Which hand**: a recording replays only on the hand it was recorded on, with the same joint table.
+- **External control** (for example, with a robot arm controller): read the host clock with `GET /api/time`. Then pass a time on that clock as `at` to `POST /api/teach/record/start` or `POST /api/teach/replay/go`. See [host/README.md](host/README.md).
+
+The `replay begin|start|go|stop` commands work only over the host link ([docs/host-protocol.md](docs/host-protocol.md)). In the text console, `replay` prints that it needs the GUI.
 
 ## Build, test, flash
 
@@ -41,7 +81,7 @@ cd Nimo_Dexhand/EE/Teleoperation
 
 ## Joints
 
-Joints are addressed by **servo id**. Model, name and travel live in `kJoints` in `include/config.h` and can only be changed there, never from the console.
+Joints are addressed by **servo id**. Model and name live in `kJoints` in `include/config.h` and can only be changed there, never from the console. The travel there is only a default: each robot stores its own (see *Per-robot travel*).
 
 | ID | Model | Name | Travel | Default vmax / vsat (own steps/s) |
 |---|---|---|---|---|
@@ -76,9 +116,9 @@ Old calibrations are discarded at the first boot (`saved for the hand before the
 
 1. **Models.** `ping`: ids 1, 3, 5 report SCS0009, the others HLS3606, no mismatch.
 2. **Travel.** `monitor on`, move each finger by hand to both mechanical ends and note the servo column. An HLS3606 still in factory multi-turn mode may show negative or > 4095 readings; note them anyway.
-3. **`config.h`.** For each joint enter a name and the travel: `min + 15` / `max − 15` for SCS0009, `min + 50` / `max − 50` for HLS3606. Reflash.
+3. **Store the travel.** For each joint `set <j> travel <min> <max>` with `min + 15` / `max − 15` for SCS0009, `min + 50` / `max − 50` for HLS3606 (the GUI's Servo setup → Travel captures both ends with this margin). Names go in `config.h`; a travel entered there becomes the default for robots that have none stored.
 4. **Angle limits.** `limits check`, then `limits write all`. HLS3606 servos are unlocked at register 55, written and locked again. **Power-cycle the servos**, then `limits check`: every joint `ok`.
-   - An HLS joint whose travel crosses the encoder zero cannot be expressed by limits: set a position offset with DEX_hand_software's `hls-setup` first (not implemented here).
+   - A travel across the reading's seam (HLS 4095/0, SCS 1023/0) cannot be expressed by limits: see *Travel across the seam* (`zero <j>` on an HLS joint, re-seat the horn on an SCS joint).
 5. **Speeds.** `sweep <j>` for each joint, `sweep <j> apply` where a suggestion is printed.
 6. **Calibrate** (see *Calibration*); joint 9 needs `home 9` if it stays multi-turn. Optionally `set <j> ilimit <mA>` for HLS joints.
 7. **`save`**, then `arm` one joint at a time, then the whole hand.
@@ -99,7 +139,7 @@ Run every step disarmed. Settings live in RAM until `save`.
    A ↔ A and B ↔ B sets the direction. Between `cal a` and `cal b`, move the joint continuously; the encoder may turn any number of times (up to 3). If tracking is interrupted (encoder dropout), `cal b` is refused; redo `cal a`.
 5. Check `joints` shows `ready yes`. Then `save`. Back up with `tools/calib.py backup` (see below), or copy the `dump` output: pasting it back, then `save`, restores everything.
 
-### Backup and restore (`tools/calib.py`)
+### Backup and restore (`tools/calib.py`, or the GUI's Config store page)
 
 NVS keeps one set of settings per ESP32. To keep calibrations in files (per operator, in git) and move them between boards, use the host tool. Close `pio device monitor` first; the port is found automatically (or pass `--port`).
 
@@ -113,7 +153,38 @@ uv run tools/calib.py restore calib/20261021-143005_woody.txt      # apply, veri
 - `restore` refuses a file whose joint table (`# <id> <name>` lines, i.e. `config.h`) differs from the device's, unless `--force`.
 - It lists the changes and asks first (`-y` skips the question), then applies, dumps again to verify and runs `save`. `--no-save` stops after the verification.
 - Any rejected command (an armed joint, a value out of range) aborts the restore and sends `load`, so RAM falls back to what NVS holds.
+- A backup holds the travel too (`set <j> travel`, and `set <j> offset` on zeroed HLS joints), so one file per robot carries its mechanical limits. A backup from before NVS v6 has no travel lines: restoring it sets the travel to `config.h`'s.
 - Not stored anywhere by design: the turn count of multi-turn joints. `home <j>` is still needed after every power-up.
+
+### Per-robot travel
+
+Robots of the same design differ in assembly, so each one needs its own mechanical limits. The travel is a stored setting like the calibration: in NVS, in `dump` and in backups. `config.h` only gives the default that `defaults` and a fresh board start from.
+
+1. Disarmed, torque off: GUI Servo setup → **Travel**, monitor on. Push each finger to its ends by hand and press **Min** / **Max** (or note the `monitor` position and type it). **Set** each joint, or `set <j> travel <min> <max>` in the console.
+2. **Save**, then Angle limits → **Write all** (`limits write all`). Power-cycle the HLS3606 servos, then **Check**: every joint `ok`.
+3. Calibrate (servo endpoints must lie inside the new travel; `set <j> servo 0 0` clears one that does not), `save`.
+4. Back up with a tag naming the robot, e.g. `calib/right/<timestamp>_robot2.txt`.
+
+To move a board to another robot: restore that robot's backup (Config store, or `tools/calib.py restore`), then **Write all** and power-cycle the HLS servos, so the servos' own limit registers match the restored travel.
+
+### Travel across the seam
+
+Each servo reports its position in a fixed range: SCS0009 0..1023 (about 300°), HLS3606 0..4095 per turn. If a joint was assembled so that its travel passes the end of that range, the reading jumps from the top to 0 in mid-travel, and no `set <j> travel <min> <max>` or angle limits can describe it. With monitor on, the GUI's Servo setup marks a joint whose reading jumps like this as *crossed*, and its *seam* column shows how many degrees each end of the travel keeps from the seam (yellow below 10°).
+
+**HLS3606: re-zero it.** The servo adds its position offset (register 31) to every reading, so the seam can be moved half a turn away from the travel:
+
+1. Disarmed, torque off, monitor on. Hold the joint by hand in the middle of its travel.
+2. GUI Servo setup → Travel → **Zero** (or `zero <j>`). The firmware writes the offset that makes this position read 2048, with angle limits 0/0 (multi-turn) until the limits are written. It reads the position back; if the servo applied the offset the other way round, it writes the mirrored value.
+3. The stored travel and servo endpoints move with the offset. If they would then cross the seam (or the read-back did not confirm the new position), they are cleared and the joint is switched off: measure the travel again (**Min** / **Max**, **Set**).
+4. **Save**, Angle limits → **Write** (writes the travel and the offset), power-cycle the servo, **Check**: `ok`. Calibrate if the endpoints were cleared.
+
+The offset is stored with the travel, in NVS and in backups, so restoring a robot's backup and **Write all** also puts each HLS servo's offset back. Joints zeroed before NVS v7 (for example with DEX_hand_software's `hls-setup`) have no offset stored and are not checked; `limits check` shows the servo's value, and **Store** (`set <j> offset <n>`) keeps it.
+
+**SCS0009: re-seat the horn.** It has no offset register, and beyond 1023/0 there are about 60° without position feedback, so the servo cannot control a joint there at all. The travel has to be moved mechanically:
+
+1. Disarmed, torque off. Servo setup → Travel → **Center on** (switches monitor on): one tile per SCS joint shows how far its reading is from 512, in degrees.
+2. Hold the joint in the middle of its travel, take the horn off and put it back on the spline where the tile is within ±5° (green).
+3. Measure the travel again (**Min** / **Max**, **Set**, **Save**, Angle limits → **Write**) and calibrate. The whole travel must fit inside 0..1023 (about 300°, minus the margins).
 
 ## Multi-turn joints and homing (`home <j>`)
 
@@ -169,7 +240,7 @@ The SCS0009's torque ceiling (register 16) is already at its factory maximum of 
 **Choosing `ilimit`.** Take the smallest of three bounds, then the lowest value that still holds the object:
 1. *Motor*: at most the full-voltage stall current V / R. The factory protection current (5.2 A) is a ceiling, not a working value.
 2. *Heat*: winding loss is I²R. With the thermal resistance R_th and time constant τ measured on the bench, the continuous current is I_cont = √((T_max − T_amb) / (R · R_th)), with T_max ≈ 55 °C to stay clear of the 65 °C trip. A held grasp runs at `gripload` × cap, so cap ≤ I_cont / 0.6.
-3. *Supply*: in fast motion the duty approaches 100 % and supply current approaches the cap, so Σ caps (+ SCS stall currents) ≤ 70–80 % of the supply rating, and the servo voltage must stay above 5.5 V.
+3. *Supply*: in fast motion the duty approaches 100 % and supply current approaches the cap, so Σ caps (+ SCS stall currents) ≤ 70–80 % of the supply rating, and the servo voltage must stay above `supplymin` (default 5.5 V).
 
 Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on`):
 - **Units and R.** Hold a few currents below the cap (adjust `grip`, or `set <j> itrip 0` to hold at the cap; the servo's own cut-out still acts). Check `current_ma × load / 100` against the supply ammeter with only this servo loaded: if they agree, the 6.5 mA unit is right; if they differ by a fixed factor, the unit is wrong. Stalled: R ≈ V × load% / I.
@@ -194,6 +265,55 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 - Several fingers squeezing at once draw a large current; see the power note above.
 - Check tendon and gear strength with the mechanical side.
 
+## Servo position-loop gains (`regs`, `set <j> kp|kd`)
+
+Every servo runs its own position loop, and it has no integral action at the factory settings (`regs`: HLS3606 P 32 D 32 I 0, SCS0009 P 15 D 15). So a servo that has to push to hold a pose stops short of its goal by **load / stiffness**:
+
+- With tendon friction, it stops on the side the goal came from. The error changes sign with the approach direction.
+- With a spring or a preload, it always stops on the same side.
+
+The 2026-11-11 recording measured about 0.45 % duty per HLS step on every HLS joint, which matches Kp 32 (Kp / 8 per 0.1 %). With 20–30 % needed to hold a pose, the joints stopped 30–70 HLS steps from the goal. While moving, the servos lagged their goal by about 70 ms.
+
+**`set <j> kp|kd <n>`** (HLS3606 only):
+
+- It is a stored per-joint setting, like `ilimit`: `save` keeps it in NVS, and it goes into `dump` and backups. `none` (the default) keeps the servo's own EEPROM gains (21, 22).
+- The firmware writes it to the RAM gains the servo runs with (registers 50 and 51) at once and at every `arm`, and reads it back. A servo that powers up reloads its EEPROM gains, and the next `arm` writes the stored ones again. The servo's EEPROM is never written.
+- It is allowed while armed, so a following joint can be tuned live.
+- `regs <j>` shows both sets: `P`/`D` are the EEPROM values, `in use Kp`/`Kd` are the RAM values.
+- On an SCS0009, P is an EEPROM register (21) and `set <j> kp` refuses.
+
+**Kp sweep, one HLS joint** (e.g. 9 `triple_far`, the largest one-sided offset, or 6 `index_near`):
+
+1. Run `regs <j>` and note the factory values.
+2. Arm and teleoperate. For each setting, record about 30 s in Teach (`kp<n>-j<j>`):
+   - move to 4–5 poses and hold each for 2 s, reaching each from both directions;
+   - then make a few fast open/close moves.
+3. Repeat at `set <j> kp 48`, `64`, `96` (and `128` if still clean). After each change, check with `regs <j>` that it is in use, also after `arm`.
+4. Stop raising Kp and back off one step when the joint buzzes, jitters at rest (`plot <j> on`: `present`), or heats up. To damp oscillation, try `set <j> kd 48` or `64`.
+5. Analyse each recording:
+
+   ```bash
+   python3 tools/tracking_analysis.py recordings/<id> --joints <j>
+   ```
+
+   - At rest, the error should fall roughly as 32 / Kp, and `stiffness` should rise in proportion to Kp.
+   - While moving, the `lag` should also shrink.
+
+6. Keep the chosen value: `set <j> kp <n>`, then `save`. Undo with `set <j> kp none`.
+
+**Result, joint 6 (2026-11-11).** The stiffness rose in proportion to Kp, and Kp 96 showed no buzz, jitter or overshoot:
+
+| Kp | stiffness %/step | rest error (mean) | lag while moving | moving rms / max | peak current |
+| --- | --- | --- | --- | --- | --- |
+| 32 (factory) | 0.46 | 34.5 | 70 ms | 75 / 100 | 1.0 A |
+| 48 | 0.67 | 32.4 | 50 ms | 49 / 71 | 1.3 A |
+| 64 | 0.89 | 22.2 | 38 ms | 39 / 57 | 1.6 A |
+| 96 | 1.33 | 12.5 | 25 ms | 27 / 41 | 1.8 A |
+
+Errors are in HLS steps.
+
+> **Note:** a stiffer loop also squeezes harder at the moment of contact, before the grip limiter shrinks the lead. Check a grasp again with the new Kp.
+
 ## Console
 
 | Command | Effect |
@@ -202,7 +322,7 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 | `status` | Armed count, last hand-level fault, one line per enabled or armed joint, global parameters. Each joint line shows state, exo, target, goal, sent goal, grip lead (`*` = contact), commanded speed (steps/s), and servo position, torque, load, current with the estimated supply current (HLS, `2700mA(~350 in)`), voltage and temperature |
 | `joints` | All 9 joints: model (`?` = not identified / mismatch), enabled, encoder, exo span, servo endpoints, travel, `vmax`/`amax`/`vsat`/`trk`, `ilimit/trip` (HLS: cap, `prot` = protection current / `itrip` %, `off`), ready, state, last fault |
 | `enc` | All encoder channels with state, AGC, magnet flags, errors and the joint each one drives |
-| `stats [reset]` | Loop jitter (max, p99), execution time, servo bus and encoder statistics, jump-guard rejections |
+| `stats [reset]` | Loop jitter (max, p99), execution time, servo bus and encoder statistics (encoder wait, late cycles, I2C stalls), jump-guard rejections |
 | `monitor on\|off` | 10 Hz rows: 9 encoder angles and 9 servo positions, polling one servo per cycle. Disarmed only |
 | `ping` | Identify every hand servo (model, firmware) and compare with `config.h`. Disarmed only |
 | `arm` | Torque on for every enabled joint not yet armed. All must be ready |
@@ -215,11 +335,18 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 | `set <j> vmax\|amax\|vsat\|trk\|grip <n>` | Per-joint motion, tracking and grip parameters, in the servo's own steps. Allowed while armed |
 | `set <j> ilimit <mA>` | HLS goal-current cap, 0 = protection current. Allowed while armed (applied at once) |
 | `set <j> itrip <%>` | HLS over-current trip as % of the cap: 0 = off, 50–100, default 90. Allowed while armed; not saved |
+| `set <j> kp\|kd <n\|none>` | HLS3606 only: position-loop Kp (1–254) / Kd (0–254). Stored like the other settings (NVS after `save`, `dump`, backups), written to the servo's RAM gains at once and at every `arm`, then read back. `none` (default) = the servo's own EEPROM gains. Allowed while armed. See *Servo position-loop gains* |
 | `set lead\|mincut\|beta\|jump\|gripload <v>` | Global parameters. Allowed while armed |
 | `set loadtrip on\|off` | Firmware load trips (off = only the servo's overload protection decides) |
+| `set <j> travel <min> <max>` | This robot's mechanical travel in the joint's own steps (0–1023 SCS0009, 0–4095 HLS3606, min < max). `0 0` = not measured: the joint cannot be enabled. Calibrated servo endpoints must lie inside it. Disarmed only; then `limits write`. Stored in NVS |
+| `set <j> offset <n\|none>` | HLS3606: the position offset (register 31, −4095..4095) the travel was measured with. Arming and `limits check` refuse a servo holding another one; `limits write` writes it. `none` = not stored, not checked (settings from before NVS v7). Set by `zero <j>`; typed by hand only to restore a backup. Disarmed only. Stored in NVS |
+| `zero <j>` | HLS3606, torque off, joint held mid-travel: writes the offset that makes this position read 2048 and limits 0/0 (multi-turn), verifies it, and moves the stored travel and servo endpoints with it (cleared if they would cross the seam). Then `save`, `limits write <j>`, power-cycle. Refused on an SCS0009. Disarmed only |
+| `regs [<j>\|all]` | Read-only: the servo's own control-loop registers. Both models: position-loop P/D, min start force, dead zones, max torque. SCS0009: holding torque, overload % and time. HLS3606: position-loop I and integral limit, the RAM gains in use (Kp/Kd/Ki, 50..52), acceleration, torque limit, current and speed loops, over-current time. Disarmed only |
+| `set supplymin\|supplymax <V>` / `set supplyms <ms>` | Supply window: the hand goes off when the median servo voltage stays outside `supplymin`..`supplymax` for `supplyms`. Defaults 5.5 / 6.5 V, 200 ms; allowed 4.5–6.0 / 6.0–7.4 V (SCS0009 input 4–7.4 V), 50–1000 ms. Stored in NVS. Widen it only after measuring where the voltage drops |
 | `sweep <j>` / `sweep <j> apply` | Measure speed and suggest `vmax`/`vsat` / apply the suggestion. `sweep <j>` is disarmed only |
-| `limits check` / `limits write <j\|all>` | Compare / sync the servos' angle-limit registers with the travel. Writes only differing values; power-cycle HLS servos afterwards. Disarmed only |
+| `limits check` / `limits write <j\|all>` | Compare / sync the servos' angle-limit registers with the stored travel. Writes only differing values; power-cycle HLS servos afterwards. Disarmed only |
 | `save` / `load` / `defaults` / `dump` | Write NVS / reload / reset to defaults in RAM / print as commands |
+| `host on` | Switch the port to the framed host link used by the PC GUI. The GUI sends this itself; a missed heartbeat returns to text. See [docs/host-protocol.md](docs/host-protocol.md) |
 | `plot <j> on` / `plot off` | Teleplot at 50 Hz: `exo_deg exo_filt_deg target goal sent ref grip_lead present load speed_cmd`, plus `temp_c`, and on HLS joints `current_ma supply_est_ma current_pct` |
 
 ## Behaviour
@@ -237,7 +364,7 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 | Scope | Faults | Action |
 |---|---|---|
 | Joint | Load trip (only when `loadtrip on`), overheat, over-current (HLS), tracking lag, servo error (overload, over-current, angle sensor), encoder lost > 3 s | Only that joint goes off. `joints` shows why; `arm <j>` brings it back |
-| Hand | Supply voltage, servo voltage error, torque mismatch, comm lost (3 failed reads or no good read for 100 ms), E-stop | Every servo goes off |
+| Hand | Supply voltage (median servo voltage outside the supply window), servo voltage error, torque mismatch, comm lost (3 failed reads or no good read for 100 ms), E-stop | Every servo goes off |
 
 **Servo reads.**
 - Full status reads are round-robin, 3 servos per cycle, so each servo is read about every 30 ms with 9 enabled.
@@ -245,10 +372,17 @@ Bench measurements (one joint of each kind, finger blocked by hand, `plot <j> on
 - All goals go out in one SYNC_WRITE.
 - Arming 9 joints at once takes about 22 ms, which counts one overrun in `stats`.
 
+**Encoder reads.**
+
+- The encoders are read on their own task (core 0). Each control cycle triggers one pass (angle only; AGC and diagnostics every 10th), reads the servos meanwhile, then waits at most 4 ms for the pass.
+- A late pass counts as no sample for every encoder: the joints go to HOLD as on encoder loss, and the loop keeps running. This guards against the ESP32 I2C driver blocking for about 1 s when the bus hangs (seen with no glove, where only the weak internal pull-ups hold SDA/SCL), which used to trip the 2 s task watchdog.
+- A stall of 100 ms or more is reported once the bus is back; `stats` shows the wait, late cycles and stalls.
+- A stall longer than 100 ms loses multi-turn tracking: home those joints again, as after an unplugged encoder.
+
 **Arming sequence, per joint.** Measured SCS0009 behaviour from servo_bringup, plus DEX_hand_software's HLS3606 checks:
 1. The servo was identified as the model in `config.h`.
 2. Read the servo state: no error, position inside travel.
-3. HLS3606 only: angle limits not 0/0 and covering the travel, resolution (register 30) = 1, position mode (register 33) = 0, protection current (register 28) 1–2047, position not negative. Then set the goal current.
+3. HLS3606 only: angle limits not 0/0 and covering the travel, resolution (register 30) = 1, position mode (register 33) = 0, protection current (register 28) 1–2047, position not negative, position offset (register 31) equal to the stored one if one is stored. Then set the goal current and the position-loop gains (stored `kp`/`kd`, or the servo's own EEPROM gains).
 4. Write goal = present position at the arm speed.
 5. Write torque on.
 6. Read back: torque on, goal = hold position, movement ≤ 5 SCS steps (17 HLS).
@@ -261,7 +395,7 @@ The goal is written before torque on, which is safe whether or not an HLS3606 go
 - Torque-off is broadcast to all 9 servos at boot and on E-stop: the servos have no communication watchdog.
 - `save`, `limits` and `sweep` are refused while any joint is armed.
 
-**NVS.** Format version 4 is 258 bytes and holds, per joint, the servo model and `ilimit` besides the M2 fields.
+**NVS.** Format version 8 is 340 bytes and holds, per joint, the servo model, `ilimit`, the travel, the HLS position offset and the HLS position-loop gains (`kp`, `kd`) besides the M2 fields, and the supply window. Older blobs still load: v7 with no gains stored (the servos keep their own), v6 also with no offset, v4 and v5 take the travel from `config.h` (and v4 the default supply window); the next `save` writes v8.
 - Versions 1–3 were saved for the hand before the rebuild (other ids and servos) and are discarded.
 - Missing, corrupt or unknown-version data is rejected, and defaults are used.
 - A joint whose stored model differs from `config.h` is reset to its defaults; the other joints keep their settings.
@@ -351,23 +485,32 @@ include/config.h          pins, bus, joint table (model, travel, vmax/vsat/amax)
 lib/AS5048B/              encoder driver (vendored, see below)
 lib/FeetechProtocol/      pure C++ packet codec and SCS0009 / HLS3606 model codecs (host-tested)
 lib/FeetechBus/           UART transport, ServoBus interface, FeetechMixedBus (per-id models)
+lib/HostLink/             pure C++ host link: COBS framing, CRC16, wire message layouts (host-tested)
 lib/TeleopCore/           pure C++, host-tested:
   joint_map / joint_config  mapping, per-joint settings, validation
-  config_blob               NVS serialization (CRC32, version 4, per-joint model)
+  config_blob               NVS serialization (CRC32, version 8, per-joint model, travel, HLS offset and gains)
   exo_tracker               continuous multi-turn exo position, auto-resolve / homing
   command_parser            console grammar, settings edits, dump format
   supervisor                per-joint checks (incl. HLS over-current), fault scope
   grip_limiter              load-adaptive goal lead cap
   speed_sweep               saturation speed measurement
   jump_guard / one_euro / rate_limiter
+  replay_buffer             ring of streamed replay frames
 src/control_task.*        100 Hz loop on core 1: per-joint states, reads, arming, sweep, settings
+src/encoder_task.*        encoder passes on core 0, triggered and awaited (bounded) by the control loop
 src/config_store.*        Preferences (NVS) read/write
-src/console.*             USB console on core 0
+src/console.*             USB console on core 0: text commands, or the framed host link after `host on`
+src/console_out.*         console output sink (text, or LOG frames in host mode)
+src/host_telemetry.*      snapshot -> HELLO / TELEMETRY / SLOW_STATUS wire structs
+docs/host-protocol.md     host link protocol v1
 src/main.cpp              setup and task start
 test/                     Unity tests (native): packet, models, core, config, sweep, tracker
 tools/measure_mapping.py  mapping consistency measurement (host Python)
-tools/calib.py            calibration backup / diff / restore over the console
+tools/tracking_analysis.py  servo error vs sent goal at rest and moving (stiffness, lag) from a Teach recording
+tools/calib.py            calibration backup / diff / restore over the text console (the GUI's Config store does the same)
+host/                     PC GUI: teleop-host (Python, FastAPI) + web UI (Svelte), see host/README.md
 calib/                    calibration backups written by tools/calib.py
+recordings/               teach recordings (git-ignored), see Teach and replay
 ```
 
 ## Vendored code

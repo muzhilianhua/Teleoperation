@@ -52,6 +52,25 @@ void test_decode_real_hls_arm_info() {
   TEST_ASSERT_EQUAL(800, a.protectionCurrent);  // 5.2 A
   TEST_ASSERT_EQUAL(1, a.resolution);
   TEST_ASSERT_EQUAL(0, a.mode);
+  TEST_ASSERT_EQUAL(0, a.offset);
+}
+
+void test_position_offset_sign_magnitude() {
+  // DEX_hand_software wrote -2202 to servo 4 (position 4250 -> 2048): 0x889A little-endian.
+  uint8_t r[kArmInfoLength];
+  for (size_t i = 0; i < kArmInfoLength; ++i) r[i] = kRealHls[kRegArmInfo + i];
+  put16(r + (kRegPositionOffset - kRegArmInfo), encodeSignMagnitude(-2202, 15), Endian::Little);
+  TEST_ASSERT_EQUAL_HEX8(0x9A, r[22]);
+  TEST_ASSERT_EQUAL_HEX8(0x88, r[23]);
+  ArmInfo a;
+  TEST_ASSERT_TRUE(decodeArmInfo(ServoModel::Hls3606, r, sizeof(r), a));
+  TEST_ASSERT_EQUAL(-2202, a.offset);
+  // The SCS0009 has no offset register: whatever is at 31..32 is ignored.
+  TEST_ASSERT_TRUE(decodeArmInfo(ServoModel::Scs0009, r, sizeof(r), a));
+  TEST_ASSERT_EQUAL(0, a.offset);
+  const int16_t values[] = {0, 1, -1, 2048, -2048, 4095, -4095};
+  for (int16_t v : values) TEST_ASSERT_EQUAL(v, signMagnitude(encodeSignMagnitude(v, 15), 15));
+  TEST_ASSERT_EQUAL_HEX16(0x0000, encodeSignMagnitude(0, 15));
 }
 
 void test_decode_scs_status_big_endian_and_signs() {
@@ -128,15 +147,73 @@ void test_mixed_sync_write_frame() {
   TEST_ASSERT_EQUAL_HEX8(checksum(pkt + 2, n - 3), pkt[n - 1]);
 }
 
+void test_decode_real_hls_tuning() {
+  ServoTuning t;
+  TEST_ASSERT_EQUAL(37, tuningLength(ServoModel::Hls3606));
+  TEST_ASSERT_TRUE(decodeTuning(ServoModel::Hls3606, kRealHls + kRegTuning, kHlsTuningLength, t));
+  TEST_ASSERT_EQUAL(1000, t.maxTorque);  // 100.0 %
+  TEST_ASSERT_EQUAL(32, t.pGain);        // factory position loop
+  TEST_ASSERT_EQUAL(32, t.dGain);
+  TEST_ASSERT_EQUAL(0, t.iGain);
+  TEST_ASSERT_EQUAL(24, t.minStartup);  // 2.4 %
+  TEST_ASSERT_EQUAL(0, t.integralLimit);
+  TEST_ASSERT_EQUAL(0, t.cwDeadZone);
+  TEST_ASSERT_EQUAL(0, t.ccwDeadZone);
+  TEST_ASSERT_EQUAL(100, t.currentP);
+  TEST_ASSERT_EQUAL(25, t.currentI);
+  TEST_ASSERT_EQUAL(50, t.speedP);
+  TEST_ASSERT_EQUAL(100, t.overCurrentTime);  // 1 s
+  TEST_ASSERT_EQUAL(25, t.speedI);
+  TEST_ASSERT_EQUAL(0, t.acceleration);
+  TEST_ASSERT_EQUAL(1000, t.torqueLimit);
+  TEST_ASSERT_EQUAL(32, t.kp);  // RAM copies in use
+  TEST_ASSERT_EQUAL(32, t.kd);
+  TEST_ASSERT_EQUAL(0, t.ki);
+  TEST_ASSERT_FALSE(decodeTuning(ServoModel::Hls3606, kRealHls + kRegTuning, kScsTuningLength, t));  // too short
+  TEST_ASSERT_FALSE(decodeTuning(ServoModel::Unknown, kRealHls + kRegTuning, kHlsTuningLength, t));
+}
+
+void test_decode_scs_tuning_big_endian() {
+  uint8_t r[kScsTuningLength] = {};
+  r[0] = 0x03;  // register 16..17: max torque 1000, big-endian
+  r[1] = 0xE8;
+  r[21 - kRegTuning] = 45;  // P
+  r[22 - kRegTuning] = 15;  // D
+  r[23 - kRegTuning] = 99;  // not an I gain on the SCS0009: ignored
+  r[24 - kRegTuning] = 10;  // min start 1.0 %
+  r[26 - kRegTuning] = 1;
+  r[27 - kRegTuning] = 2;
+  r[37 - kRegTuning] = 20;   // holding torque %
+  r[38 - kRegTuning] = 200;  // protection time 2 s
+  r[39 - kRegTuning] = 80;   // overload %
+  ServoTuning t;
+  TEST_ASSERT_EQUAL(24, tuningLength(ServoModel::Scs0009));
+  TEST_ASSERT_TRUE(decodeTuning(ServoModel::Scs0009, r, sizeof(r), t));
+  TEST_ASSERT_EQUAL(1000, t.maxTorque);
+  TEST_ASSERT_EQUAL(45, t.pGain);
+  TEST_ASSERT_EQUAL(15, t.dGain);
+  TEST_ASSERT_EQUAL(0, t.iGain);
+  TEST_ASSERT_EQUAL(10, t.minStartup);
+  TEST_ASSERT_EQUAL(1, t.cwDeadZone);
+  TEST_ASSERT_EQUAL(2, t.ccwDeadZone);
+  TEST_ASSERT_EQUAL(20, t.holdingTorque);
+  TEST_ASSERT_EQUAL(200, t.protectionTime);
+  TEST_ASSERT_EQUAL(80, t.overloadPct);
+  TEST_ASSERT_EQUAL(0, t.kp);  // no RAM gain copies read on the SCS0009
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_identify_models);
   RUN_TEST(test_decode_real_hls_status);
   RUN_TEST(test_decode_real_hls_arm_info);
+  RUN_TEST(test_position_offset_sign_magnitude);
   RUN_TEST(test_decode_scs_status_big_endian_and_signs);
   RUN_TEST(test_hls_negative_position_and_speed_units);
   RUN_TEST(test_speed_register_never_zero_and_capped);
   RUN_TEST(test_encode_goal_blocks);
   RUN_TEST(test_mixed_sync_write_frame);
+  RUN_TEST(test_decode_real_hls_tuning);
+  RUN_TEST(test_decode_scs_tuning_big_endian);
   return UNITY_END();
 }

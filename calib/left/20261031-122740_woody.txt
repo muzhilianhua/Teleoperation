@@ -1,0 +1,127 @@
+# Teleoperation calibration backup
+# saved 2026-10-31 12:27:40 from /dev/cu.usbmodem11101
+# tag: woody
+# note: lefthand_new_01
+# restore: GUI Config Store, uv run tools/calib.py restore <file>, or paste it and `save`
+defaults
+# hand left
+# 1 thumb_far
+set 1 enc 6
+set 1 travel 314 773
+set 1 exospan 1779 3723
+set 1 servo 465 678
+set 1 vmax 1000
+set 1 amax 8000
+set 1 vsat 873
+set 1 trk 40
+set 1 grip 60
+set 1 on
+# 2 thumb_near
+set 2 enc 3
+set 2 offset 2325
+set 2 travel 1429 2538
+set 2 exospan 8657 3628
+set 2 servo 1768 2533
+set 2 vmax 4194
+set 2 amax 26666
+set 2 vsat 3109
+set 2 trk 133
+set 2 grip 200
+set 2 ilimit 0
+set 2 on
+# 3 thumb_palm
+set 3 enc 5
+set 3 travel 15 352
+set 3 exospan 10306 -1793
+set 3 servo 166 18
+set 3 vmax 1000
+set 3 amax 8000
+set 3 vsat 952
+set 3 trk 40
+set 3 grip 60
+set 3 on
+# 4 thumb_abduction
+set 4 enc 7
+set 4 offset 1498
+set 4 travel 1561 3085
+set 4 exospan 12195 -11464
+set 4 servo 2072 2917
+set 4 vmax 4173
+set 4 amax 26666
+set 4 vsat 2880
+set 4 trk 133
+set 4 grip 200
+set 4 ilimit 0
+set 4 on
+# 5 index_far
+set 5 enc 4
+set 5 travel 44 328
+set 5 exospan 2297 5395
+set 5 servo 46 291
+set 5 vmax 1000
+set 5 amax 8000
+set 5 vsat 920
+set 5 trk 40
+set 5 grip 60
+set 5 on
+# 6 index_near
+set 6 enc 8
+set 6 travel 1013 2014
+set 6 exospan 12860 3927
+set 6 servo 1026 1911
+set 6 vmax 4056
+set 6 amax 26666
+set 6 vsat 3026
+set 6 trk 133
+set 6 grip 200
+set 6 ilimit 0
+set 6 on
+# 7 index_abduction
+set 7 enc 2
+set 7 offset -2259
+set 7 travel 1730 2434
+set 7 exospan 9241 -1500
+set 7 servo 2086 2434
+set 7 vmax 4096
+set 7 amax 26666
+set 7 vsat 3060
+set 7 trk 133
+set 7 grip 200
+set 7 ilimit 0
+set 7 on
+# 8 triple_near
+set 8 enc 1
+set 8 offset 1933
+set 8 travel 1720 2458
+set 8 exospan 12709 -2320
+set 8 servo 2453 1976
+set 8 vmax 4101
+set 8 amax 26666
+set 8 vsat 2584
+set 8 trk 133
+set 8 grip 200
+set 8 ilimit 0
+set 8 on
+# 9 triple_far
+set 9 enc 0
+set 9 offset 2229
+set 9 travel 1532 2343
+set 9 exospan 14802 -4061
+set 9 servo 2328 1536
+set 9 vmax 4374
+set 9 amax 26666
+set 9 vsat 2994
+set 9 trk 133
+set 9 grip 200
+set 9 ilimit 0
+set 9 on
+set lead 0
+set mincut 1
+set beta 0.01
+set jump 25
+set gripload 60
+set loadtrip off
+set supplymin 5.5
+set supplymax 6.5
+set supplyms 200
+# end of dump: run `save` to store it

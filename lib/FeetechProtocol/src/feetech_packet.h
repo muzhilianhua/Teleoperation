@@ -78,6 +78,7 @@ void put16(uint8_t* p, uint16_t value, Endian endian);
 uint16_t get16(const uint8_t* p, Endian endian);
 // Sign-magnitude decode as used by present speed (bit 15) and load (bit 10).
 int16_t signMagnitude(uint16_t raw, uint8_t signBit);
+uint16_t encodeSignMagnitude(int16_t value, uint8_t signBit);
 
 const char* parseResultToString(ParseResult result);
 

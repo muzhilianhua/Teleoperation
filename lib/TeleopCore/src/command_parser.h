@@ -42,7 +42,13 @@ enum class Verb : uint8_t {
   Sweep,        // joint
   SweepApply,   // joint
   Home,         // joint: glove held at pose A, fixes a multi-turn joint's turn count
+  Host,         // flag = on: switch the console to the framed host link (PC GUI)
+  Replay,       // values[0] = ReplayAction; frames come over the host link
+  Zero,         // joint: HLS3606 position offset so the present position reads 2048
+  Regs,         // joint 0 = every joint: print the servo's control-loop registers
 };
+
+enum class ReplayAction : uint8_t { Begin = 0, Start, Go, Stop };
 
 enum class SetKey : uint8_t {
   None,
@@ -51,6 +57,8 @@ enum class SetKey : uint8_t {
   Exo,        // values[0..1] = raw counts at A and B (legacy, span < half a turn)
   ExoSpan,    // values[0] = raw count at A, values[1] = continuous span to B in counts
   Servo,      // values[0..1] = servo counts at A and B
+  Travel,     // values[0..1] = travel min and max, servo counts
+  Offset,     // values[0] = HLS position offset, kOffsetUnset for "none"
   VMax,
   AMax,
   VSat,
@@ -64,6 +72,11 @@ enum class SetKey : uint8_t {
   Jump,       // global
   GripLoad,   // global
   LoadTrip,   // global, values[0] = 1 (on) / 0 (off)
+  SupplyMin,  // global, V
+  SupplyMax,  // global, V
+  SupplyMs,   // global, ms
+  Kp,         // HLS position-loop Kp (kGainUnset = the servo's own), written to the servo at once
+  Kd,         // HLS position-loop Kd (kGainUnset = the servo's own), written to the servo at once
 };
 
 struct ParsedCommand {
@@ -79,6 +92,8 @@ struct ParsedCommand {
 const char* parseCommand(const char* line, ParsedCommand& out);
 
 bool isGlobalKey(SetKey key);
+// Stored settings that are also written to the servo as soon as they change.
+bool isServoGainKey(SetKey key);
 // Commands that change calibration, mapping or persistent state, or that need
 // the bus for long transactions, are refused while torque is on.
 bool requiresDisarmed(const ParsedCommand& command);
@@ -93,7 +108,9 @@ const char* applySetting(const ParsedCommand& command, JointSettings* joints,
 
 // Writes the whole configuration as console commands, starting with
 // `defaults`. Returns the text length, or 0 if capacity was too small.
+// handName (e.g. "right") adds a `# hand <name>` comment line after
+// `defaults`, which backup tools check before restoring onto another hand.
 size_t formatDump(const JointSettings* joints, const JointDefaults* defaults, uint8_t count,
-                  const GlobalSettings& global, char* out, size_t capacity);
+                  const GlobalSettings& global, char* out, size_t capacity, const char* handName = nullptr);
 
 }  // namespace teleop
