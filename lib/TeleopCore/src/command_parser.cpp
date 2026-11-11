@@ -194,6 +194,22 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     out.valueCount = 2;
     return nullptr;
   }
+  if (eq(key, "kp") || eq(key, "kd")) {
+    const bool kp = eq(key, "kp");
+    out.key = kp ? SetKey::Kp : SetKey::Kd;
+    out.valueCount = 1;
+    long v = 0;
+    if (tk.n == 4 && eq(tk.t[3], "none")) {
+      out.values[0] = kGainUnset;
+      return nullptr;
+    }
+    if (tk.n != 4 || !parseInt(tk.t[3], kp ? 1 : 0, kMaxServoGain, v)) {
+      return kp ? "usage: set <joint> kp <1..254|none>  (HLS position-loop Kp; none = the servo's own)"
+                : "usage: set <joint> kd <0..254|none>  (HLS position-loop Kd; none = the servo's own)";
+    }
+    out.values[0] = static_cast<float>(v);
+    return nullptr;
+  }
   for (const KeyName& k : kJointNumberKeys) {
     if (!eq(key, k.name)) continue;
     long v = 0;
@@ -205,7 +221,7 @@ const char* parseSet(const Tokens& tk, ParsedCommand& out) {
     out.valueCount = 1;
     return nullptr;
   }
-  return "unknown key (on off enc travel offset exo exospan servo vmax amax vsat trk grip ilimit itrip | lead mincut beta jump gripload loadtrip supplymin supplymax supplyms)";
+  return "unknown key (on off enc travel offset exo exospan servo vmax amax vsat trk grip ilimit itrip kp kd | lead mincut beta jump gripload loadtrip supplymin supplymax supplyms)";
 }
 
 struct Simple {
@@ -297,6 +313,15 @@ const char* parseCommand(const char* line, ParsedCommand& out) {
       return nullptr;
     }
     return "usage: zero <joint>  (HLS3606, torque off, joint held mid-travel)";
+  }
+  if (eq(cmd, "regs")) {
+    long joint = 0;
+    if (tk.n == 1 || (tk.n == 2 && (eq(tk.t[1], "all") || parseInt(tk.t[1], 1, 253, joint)))) {
+      out.verb = Verb::Regs;
+      out.joint = static_cast<uint8_t>(joint);
+      return nullptr;
+    }
+    return "usage: regs [<joint>|all]";
   }
   if (eq(cmd, "sweep")) {
     long joint = 0;
@@ -394,6 +419,8 @@ bool isGlobalKey(SetKey key) {
          key == SetKey::SupplyMax || key == SetKey::SupplyMs;
 }
 
+bool isServoGainKey(SetKey key) { return key == SetKey::Kp || key == SetKey::Kd; }
+
 bool requiresDisarmed(const ParsedCommand& c) {
   switch (c.verb) {
     case Verb::Cal:
@@ -406,6 +433,7 @@ bool requiresDisarmed(const ParsedCommand& c) {
     case Verb::LimitsWrite:
     case Verb::Sweep:        // drives one joint at full speed: nothing else may be armed
     case Verb::Zero:         // EEPROM write, and moves the stored positions
+    case Verb::Regs:         // one long read per servo: too long for an armed cycle
       return true;
     case Verb::Monitor:
       return c.flag;
@@ -482,6 +510,8 @@ const char* applySetting(const ParsedCommand& c, JointSettings* joints, const Jo
     case SetKey::Grip: s.gripSteps = static_cast<uint16_t>(v0); break;
     case SetKey::CurrentLimit: s.currentLimitMa = static_cast<uint16_t>(v0); break;
     case SetKey::CurrentTrip: s.currentTripPct = static_cast<uint8_t>(v0 > 255 ? 255 : v0); break;
+    case SetKey::Kp: s.kp = static_cast<uint8_t>(v0); break;
+    case SetKey::Kd: s.kd = static_cast<uint8_t>(v0); break;
     default: return "unknown key";
   }
   const char* error = validateJoint(s, defaults[index], encoderCount);
@@ -511,6 +541,8 @@ size_t formatDump(const JointSettings* joints, const JointDefaults* defaults, ui
     a.add("set %u vmax %u\nset %u amax %u\nset %u vsat %u\nset %u trk %u\nset %u grip %u\n", d.servoId,
           s.vmax, d.servoId, s.amax, d.servoId, s.vsat, d.servoId, s.trackSteps, d.servoId, s.gripSteps);
     if (d.model == feetech::ServoModel::Hls3606) a.add("set %u ilimit %u\n", d.servoId, s.currentLimitMa);
+    if (gainStored(s.kp)) a.add("set %u kp %u\n", d.servoId, s.kp);
+    if (gainStored(s.kd)) a.add("set %u kd %u\n", d.servoId, s.kd);
     a.add("set %u %s\n", d.servoId, s.enabled ? "on" : "off");
   }
   a.add("set lead %g\nset mincut %g\nset beta %g\nset jump %g\nset gripload %g\nset loadtrip %s\n",

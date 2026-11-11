@@ -127,6 +127,21 @@ bool FeetechMixedBus::readArmInfo(uint8_t id, feetech::ArmInfo& out) {
   return feetech::decodeArmInfo(m, r, sizeof(r), out);
 }
 
+bool FeetechMixedBus::readTuning(uint8_t id, feetech::ServoTuning& out) {
+  const ServoModel m = model(id);
+  const uint8_t length = feetech::tuningLength(m);
+  if (length == 0) return false;
+  uint8_t r[feetech::kHlsTuningLength];
+  if (!readRegisters(id, feetech::kRegTuning, length, r, nullptr)) return false;
+  return feetech::decodeTuning(m, r, length, out);
+}
+
+bool FeetechMixedBus::writePositionGains(uint8_t id, uint8_t kp, uint8_t kd) {
+  if (model(id) != ServoModel::Hls3606) return false;
+  const uint8_t gains[2] = {kp, kd};
+  return writeRegisters(id, feetech::kRegHlsKp, gains, sizeof(gains));
+}
+
 bool FeetechMixedBus::writeHlsSetup(uint8_t id, int16_t lo, int16_t hi, int16_t offset) {
   if (model(id) != ServoModel::Hls3606) return false;
   const ModelInfo& info = feetech::modelInfo(ServoModel::Hls3606);

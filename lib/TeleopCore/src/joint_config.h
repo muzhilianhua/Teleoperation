@@ -74,7 +74,17 @@ struct JointSettings {
   // cut-out still acts). A bench setting: not stored in NVS or in `dump`, so
   // it is back to the default after boot, `load` or `defaults`.
   uint8_t currentTripPct = 90;
+  // HLS3606 only: position-loop gains written to the servo's RAM (registers
+  // 50, 51) at arming and whenever they are set. kGainUnset = keep the
+  // servo's own EEPROM gains (21, 22; factory P 32 D 32). Stiffness grows
+  // with Kp, and with it how close a loaded joint holds its goal.
+  uint8_t kp = 255;  // kGainUnset
+  uint8_t kd = 255;
 };
+
+constexpr uint8_t kGainUnset = 255;
+constexpr uint8_t kMaxServoGain = 254;
+inline bool gainStored(uint8_t gain) { return gain != kGainUnset; }
 
 constexpr uint16_t kMinCurrentLimitMa = 7;      // 1 unit of 6.5 mA
 constexpr uint16_t kMaxCurrentLimitMa = 13306;  // 2047 units

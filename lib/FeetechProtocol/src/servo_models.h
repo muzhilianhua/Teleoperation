@@ -100,4 +100,43 @@ struct ArmInfo {
 // Registers 9..33 (kArmInfoLength bytes).
 bool decodeArmInfo(ServoModel model, const uint8_t* regs, size_t length, ArmInfo& out);
 
+// Control-loop tuning, read-only diagnostics (`regs`): the EEPROM settings
+// from register 16 and, on the HLS3606, the RAM copies the servo loads them
+// into at power-up and actually runs with (41..52). Register map from the
+// Feetech HLS memory table and DEX_hand_software's registers.py.
+constexpr uint8_t kRegTuning = 16;
+constexpr uint8_t kScsTuningLength = 24;  // 16..39
+constexpr uint8_t kHlsTuningLength = 37;  // 16..52
+constexpr uint8_t kRegHlsKp = 50;         // RAM, Kd follows at 51
+
+struct ServoTuning {
+  uint16_t maxTorque = 0;     // 0.1 %, register 16 (EEPROM)
+  uint8_t pGain = 0;          // 21, position loop P (HLS: in units of 1/8)
+  uint8_t dGain = 0;          // 22, position loop D
+  uint8_t iGain = 0;          // 23, position loop I (HLS only)
+  uint8_t minStartup = 0;     // 24, minimum output, 0.1 %
+  uint8_t integralLimit = 0;  // 25, HLS only: max integral = 4 x this, 0 = no limit
+  uint8_t cwDeadZone = 0;     // 26, steps
+  uint8_t ccwDeadZone = 0;    // 27, steps
+  // SCS0009 only.
+  uint8_t holdingTorque = 0;   // 37, %
+  uint8_t protectionTime = 0;  // 38, 10 ms
+  uint8_t overloadPct = 0;     // 39, %
+  // HLS3606 only.
+  uint8_t currentP = 0;         // 34
+  uint8_t currentI = 0;         // 35
+  uint8_t speedP = 0;           // 37
+  uint8_t overCurrentTime = 0;  // 38, 10 ms
+  uint8_t speedI = 0;           // 39
+  uint8_t acceleration = 0;     // 41 (RAM), 8.7 deg/s^2 per unit, 0 = maximum
+  uint16_t torqueLimit = 0;     // 48 (RAM), 0.1 %
+  uint8_t kp = 0;               // 50 (RAM): the gains in use
+  uint8_t kd = 0;               // 51
+  uint8_t ki = 0;               // 52
+};
+
+// Bytes to read from kRegTuning for this model, 0 for Unknown.
+uint8_t tuningLength(ServoModel model);
+bool decodeTuning(ServoModel model, const uint8_t* regs, size_t length, ServoTuning& out);
+
 }  // namespace feetech

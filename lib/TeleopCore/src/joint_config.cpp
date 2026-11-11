@@ -73,6 +73,10 @@ const char* validateJoint(const JointSettings& s, const JointDefaults& d, uint8_
     if (d.model != feetech::ServoModel::Hls3606) return "ilimit applies to HLS3606 joints only";
     if (!inRange(s.currentLimitMa, kMinCurrentLimitMa, kMaxCurrentLimitMa)) return "ilimit outside 7..13306 mA";
   }
+  if (gainStored(s.kp) || gainStored(s.kd)) {
+    if (d.model != feetech::ServoModel::Hls3606) return "kp / kd apply to HLS3606 joints only";
+    if (gainStored(s.kp) && s.kp < 1) return "kp outside 1..254";
+  }
   if (s.currentTripPct != kDefaultCurrentTripPct) {
     if (d.model != feetech::ServoModel::Hls3606) return "itrip applies to HLS3606 joints only";
     if (s.currentTripPct != 0 && !inRange(s.currentTripPct, kMinCurrentTripPct, kMaxCurrentTripPct)) {

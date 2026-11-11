@@ -248,6 +248,9 @@ class TeleopController {
   void handleLimitsCheck();
   void handleLimitsWrite(uint8_t servoId);
   void handleZero(uint8_t servoId);
+  void handleRegs(uint8_t servoId);
+  void reportRegs(const JointChannel& ch);
+  bool applyServoGains(const JointChannel& ch, bool report);
   void handleSweep(uint8_t servoId);
   void handleSweepApply(uint8_t servoId);
   void handleReplay(const Command& command);

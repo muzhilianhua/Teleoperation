@@ -45,6 +45,7 @@ enum class Verb : uint8_t {
   Host,         // flag = on: switch the console to the framed host link (PC GUI)
   Replay,       // values[0] = ReplayAction; frames come over the host link
   Zero,         // joint: HLS3606 position offset so the present position reads 2048
+  Regs,         // joint 0 = every joint: print the servo's control-loop registers
 };
 
 enum class ReplayAction : uint8_t { Begin = 0, Start, Go, Stop };
@@ -74,6 +75,8 @@ enum class SetKey : uint8_t {
   SupplyMin,  // global, V
   SupplyMax,  // global, V
   SupplyMs,   // global, ms
+  Kp,         // HLS position-loop Kp (kGainUnset = the servo's own), written to the servo at once
+  Kd,         // HLS position-loop Kd (kGainUnset = the servo's own), written to the servo at once
 };
 
 struct ParsedCommand {
@@ -89,6 +92,8 @@ struct ParsedCommand {
 const char* parseCommand(const char* line, ParsedCommand& out);
 
 bool isGlobalKey(SetKey key);
+// Stored settings that are also written to the servo as soon as they change.
+bool isServoGainKey(SetKey key);
 // Commands that change calibration, mapping or persistent state, or that need
 // the bus for long transactions, are refused while torque is on.
 bool requiresDisarmed(const ParsedCommand& command);

@@ -67,7 +67,7 @@ const char* blobStatusToString(BlobStatus status) {
     case BlobStatus::BadJointCount: return "joint count mismatch";
     case BlobStatus::InvalidJoint: return "invalid joint settings (or changed servo model) reset to defaults";
     case BlobStatus::InvalidGlobal: return "invalid global settings reset to defaults";
-    case BlobStatus::Upgraded: return "older format: no HLS offset stored (and travel from config.h for v4/v5, supply window defaults for v4)";
+    case BlobStatus::Upgraded: return "older format: no HLS gains stored (v7), no HLS offset (v6), travel from config.h (v4/v5), supply window defaults (v4)";
   }
   return "?";
 }
@@ -112,6 +112,8 @@ size_t packConfig(const JointSettings* joints, const JointDefaults* defaults, ui
     w.u16(static_cast<uint16_t>(s.travelMin));
     w.u16(static_cast<uint16_t>(s.travelMax));
     w.u16(static_cast<uint16_t>(s.offset));
+    w.u8(s.kp);
+    w.u8(s.kd);
   }
   w.f32(global.leadMs);
   w.f32(global.minCutoffHz);
@@ -136,7 +138,11 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, const JointDefaults* d
   const uint16_t version = r.u16();
   if (version >= 1 && version < 4) return BlobStatus::Superseded;
   if (version < 4 || version > kBlobVersion) return BlobStatus::BadVersion;
-  const size_t expected = version == 4 ? kBlobSizeV4 : version == 5 ? kBlobSizeV5 : version == 6 ? kBlobSizeV6 : kBlobSize;
+  const size_t expected = version == 4   ? kBlobSizeV4
+                          : version == 5 ? kBlobSizeV5
+                          : version == 6 ? kBlobSizeV6
+                          : version == 7 ? kBlobSizeV7
+                                         : kBlobSize;
   if (length != expected) return BlobStatus::BadSize;
   Reader crcReader(in + length - 4);
   if (crcReader.u32() != crc32(in, length - 4)) return BlobStatus::BadCrc;
@@ -168,6 +174,8 @@ BlobStatus unpackConfig(const uint8_t* in, size_t length, const JointDefaults* d
       s.travelMax = defaults[i].travelMax;
     }
     s.offset = version >= 7 ? r.i16() : kOffsetUnset;
+    s.kp = version >= 8 ? r.u8() : kGainUnset;
+    s.kd = version >= 8 ? r.u8() : kGainUnset;
   }
   GlobalSettings g = globalDefaults;
   g.leadMs = r.f32();

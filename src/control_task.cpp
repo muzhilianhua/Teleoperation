@@ -736,6 +736,7 @@ void TeleopController::handleCommand(const Command& c) {
     case Verb::LimitsCheck: handleLimitsCheck(); break;
     case Verb::LimitsWrite: handleLimitsWrite(c.joint); break;
     case Verb::Zero: handleZero(c.joint); break;
+    case Verb::Regs: handleRegs(c.joint); break;
     case Verb::Sweep: handleSweep(c.joint); break;
     case Verb::SweepApply: handleSweepApply(c.joint); break;
     case Verb::Replay: handleReplay(c); break;
@@ -767,6 +768,16 @@ void TeleopController::handleSet(const Command& c) {
       ch.wasHomed = false;
     }
     applyRuntimeParams(ch);
+  }
+  if (teleop::isServoGainKey(c.key)) {
+    const JointChannel* ch = channelForServo(c.joint);
+    if (ch != nullptr && bus_.model(ch->def->servoId) != feetech::ServoModel::Hls3606) {
+      event({EV::Generic, c.joint, SV::Warning}, "joint %u: kp / kd stored; servo not identified yet, written at `arm`",
+            c.joint);
+    } else if (ch != nullptr && !applyServoGains(*ch, true)) {
+      refuse("joint %u: kp / kd stored but the servo did not take them (check `regs %u`)", c.joint, c.joint);
+    }
+    return;
   }
   if (teleop::isGlobalKey(c.key)) {
     event({EV::SettingChanged, 0}, "global: lead %.0f ms, mincut %.3f Hz, beta %.4f, jump %.0f deg, gripload %.0f %%, loadtrip %s, supply %.2f..%.2f V for %u ms",
@@ -968,6 +979,75 @@ void TeleopController::handleLimitsWrite(uint8_t servoId) {
     if (!ok) cmdFailed_ = true;
   }
   if (servoId != 0 && channelForServo(servoId) == nullptr) refuse("no joint with servo id %u", servoId);
+}
+
+// `regs [<j>]`: the servo's own control-loop registers, read-only. The
+// position-loop gains decide how far a servo stops from its goal under load
+// (error ~ load / P), so they are what to look at when tracking is off.
+void TeleopController::handleRegs(uint8_t servoId) {
+  if (servoId != 0) {
+    const JointChannel* ch = channelForServo(servoId);
+    if (ch == nullptr) {
+      refuse("no joint with servo id %u", servoId);
+      return;
+    }
+    reportRegs(*ch);
+    return;
+  }
+  for (const JointChannel& ch : channels_) reportRegs(ch);
+}
+
+void TeleopController::reportRegs(const JointChannel& ch) {
+  const uint8_t id = ch.def->servoId;
+  const feetech::ServoModel model = bus_.model(id);
+  if (model == feetech::ServoModel::Unknown) {
+    event({EV::Generic, id, SV::Warning}, "servo %u (%s): model not identified (run `ping`)", id, ch.def->name);
+    return;
+  }
+  feetech::ServoTuning t;
+  if (!bus_.readTuning(id, t)) {
+    event({EV::Generic, id, SV::Warning}, "servo %u (%s): no reply to the register read", id, ch.def->name);
+    return;
+  }
+  if (model == feetech::ServoModel::Scs0009) {
+    event({EV::Generic, id, SV::Info},
+          "servo %u (%s) SCS0009: pos loop P %u D %u, min start %.1f %%, dead zone %u/%u, torque max %.1f %%, "
+          "holding %u %%, overload %u %% for %u ms",
+          id, ch.def->name, t.pGain, t.dGain, 0.1f * t.minStartup, t.cwDeadZone, t.ccwDeadZone, 0.1f * t.maxTorque,
+          t.holdingTorque, t.overloadPct, 10u * t.protectionTime);
+    return;
+  }
+  event({EV::Generic, id, SV::Info},
+        "servo %u (%s) HLS3606: pos loop P %u D %u I %u (in use Kp %u Kd %u Ki %u), I limit %u, min start %.1f %%, "
+        "dead zone %u/%u",
+        id, ch.def->name, t.pGain, t.dGain, t.iGain, t.kp, t.kd, t.ki, t.integralLimit, 0.1f * t.minStartup,
+        t.cwDeadZone, t.ccwDeadZone);
+  event({EV::Generic, id, SV::Info},
+        "servo %u: torque max %.1f %% limit %.1f %%, accel %u (0 = max), current loop P %u I %u, speed loop P %u I %u, "
+        "over-current %u ms",
+        id, 0.1f * t.maxTorque, 0.1f * t.torqueLimit, t.acceleration, t.currentP, t.currentI, t.speedP, t.speedI,
+        10u * t.overCurrentTime);
+}
+
+// HLS position-loop gains: the stored kp / kd (or, unset, the servo's own
+// EEPROM gains 21 / 22) written to the RAM gains the servo runs with (50, 51)
+// and read back. Called at arming and whenever kp / kd are set.
+bool TeleopController::applyServoGains(const JointChannel& ch, bool report) {
+  const uint8_t id = ch.def->servoId;
+  if (ch.def->model != feetech::ServoModel::Hls3606 || bus_.model(id) != feetech::ServoModel::Hls3606) return true;
+  feetech::ServoTuning t;
+  if (!bus_.readTuning(id, t)) return false;
+  const uint8_t kp = teleop::gainStored(ch.settings.kp) ? ch.settings.kp : t.pGain;
+  const uint8_t kd = teleop::gainStored(ch.settings.kd) ? ch.settings.kd : t.dGain;
+  if (t.kp != kp || t.kd != kd) {
+    if (!bus_.writePositionGains(id, kp, kd) || !bus_.readTuning(id, t) || t.kp != kp || t.kd != kd) return false;
+  }
+  if (report) {
+    event({EV::SettingChanged, id}, "joint %u: Kp %u%s Kd %u%s in use (servo EEPROM P %u D %u)", id, t.kp,
+          teleop::gainStored(ch.settings.kp) ? "" : " (own)", t.kd, teleop::gainStored(ch.settings.kd) ? "" : " (own)",
+          t.pGain, t.dGain);
+  }
+  return true;
 }
 
 void TeleopController::handleZero(uint8_t servoId) {
@@ -1373,6 +1453,7 @@ const char* TeleopController::armJoint(uint8_t index, const ServoState& st, uint
     if (hold < 0) return "HLS position is negative (multi-turn): set the limits and power-cycle";
     ch.protectionRaw = info.protectionCurrent;
     applyGoalCurrent(ch);  // before the first goal: it carries the current cap
+    if (!applyServoGains(ch, false)) return "HLS position-loop gains (kp / kd) not taken: check `regs <j>`";
   }
   ServoState check;
   if (!bus_.writeGoal(id, hold, config::kArmSpeed * ch.scale)) return "goal write failed";

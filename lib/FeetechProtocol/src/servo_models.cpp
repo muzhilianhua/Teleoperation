@@ -110,4 +110,46 @@ bool decodeArmInfo(ServoModel model, const uint8_t* r, size_t length, ArmInfo& o
   return true;
 }
 
+uint8_t tuningLength(ServoModel model) {
+  switch (model) {
+    case ServoModel::Scs0009: return kScsTuningLength;
+    case ServoModel::Hls3606: return kHlsTuningLength;
+    case ServoModel::Unknown: break;
+  }
+  return 0;
+}
+
+bool decodeTuning(ServoModel model, const uint8_t* r, size_t length, ServoTuning& out) {
+  const uint8_t need = tuningLength(model);
+  if (need == 0 || r == nullptr || length < need) return false;
+  const Endian e = modelInfo(model).endian;
+  auto reg = [r](uint8_t address) { return r[address - kRegTuning]; };
+  out = ServoTuning{};
+  out.maxTorque = get16(r, e);
+  out.pGain = reg(21);
+  out.dGain = reg(22);
+  out.minStartup = reg(24);
+  out.cwDeadZone = reg(26);
+  out.ccwDeadZone = reg(27);
+  if (model == ServoModel::Scs0009) {
+    out.holdingTorque = reg(37);
+    out.protectionTime = reg(38);
+    out.overloadPct = reg(39);
+    return true;
+  }
+  out.iGain = reg(23);
+  out.integralLimit = reg(25);
+  out.currentP = reg(34);
+  out.currentI = reg(35);
+  out.speedP = reg(37);
+  out.overCurrentTime = reg(38);
+  out.speedI = reg(39);
+  out.acceleration = reg(41);
+  out.torqueLimit = get16(r + (48 - kRegTuning), e);
+  out.kp = reg(50);
+  out.kd = reg(51);
+  out.ki = reg(52);
+  return true;
+}
+
 }  // namespace feetech

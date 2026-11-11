@@ -46,6 +46,8 @@ void configureSample(JointSettings* joints, GlobalSettings& g) {
   joints[1].trackSteps = 60;
   joints[1].gripSteps = 80;
   joints[5].offset = -2202;  // HLS joint zeroed by `zero 6`
+  joints[5].kp = 96;          // stiffer HLS position loop
+  joints[5].kd = 40;
   g.leadMs = 80.0f;
   g.beta = 0.025f;
   g.jumpDeg = 30.0f;
@@ -72,6 +74,8 @@ void assertJointsEqual(const JointSettings& a, const JointSettings& b) {
   TEST_ASSERT_EQUAL(a.trackSteps, b.trackSteps);
   TEST_ASSERT_EQUAL(a.gripSteps, b.gripSteps);
   TEST_ASSERT_EQUAL(a.currentLimitMa, b.currentLimitMa);
+  TEST_ASSERT_EQUAL(a.kp, b.kp);
+  TEST_ASSERT_EQUAL(a.kd, b.kd);
 }
 
 }  // namespace
@@ -143,7 +147,7 @@ void test_blob_round_trip() {
   configureSample(joints, g);
   uint8_t blob[kBlobSize];
   TEST_ASSERT_EQUAL(kBlobSize, packConfig(joints, kDefaults, kMaxJoints, g, blob, sizeof(blob)));
-  TEST_ASSERT_EQUAL(322, kBlobSize);
+  TEST_ASSERT_EQUAL(340, kBlobSize);
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
@@ -160,7 +164,7 @@ void test_blob_round_trip() {
   TEST_ASSERT_EQUAL(400, lg.supplyMs);
 }
 
-// Older layouts, made from a current blob: drop each joint's offset (v6),
+// Older layouts, made from a current blob: drop each joint's gains (v7), offset (v6),
 // travel (v5) and the supply window (v4), then fix the version and CRC.
 size_t packOlder(const JointSettings* joints, const GlobalSettings& g, uint16_t version, uint8_t* out) {
   uint8_t current[kBlobSize];
@@ -169,7 +173,7 @@ size_t packOlder(const JointSettings* joints, const GlobalSettings& g, uint16_t 
   memcpy(out, current, 8);
   n = 8;
   for (uint8_t i = 0; i < kMaxJoints; ++i) {
-    const size_t record = version == 6 ? kJointRecordSizeV6 : kJointRecordSizeV5;
+    const size_t record = version == 7 ? kJointRecordSizeV7 : version == 6 ? kJointRecordSizeV6 : kJointRecordSizeV5;
     memcpy(out + n, current + 8 + i * kJointRecordSize, record);
     n += record;
   }
@@ -190,6 +194,7 @@ void test_blob_version_4_upgraded() {
   uint8_t blob[kBlobSize];
   TEST_ASSERT_EQUAL(kBlobSizeV4, packOlder(joints, g, 4, blob));
   joints[5].offset = kOffsetUnset;  // not in v4
+  joints[5].kp = joints[5].kd = kGainUnset;
 
   JointSettings loaded[kMaxJoints];
   GlobalSettings lg;
@@ -246,6 +251,25 @@ void test_blob_version_6_has_no_offset() {
   for (uint8_t i = 0; i < kMaxJoints; ++i) TEST_ASSERT_FALSE(offsetStored(loaded[i]));
 }
 
+// A version 7 blob keeps the offset; no HLS gains are stored.
+void test_blob_version_7_has_no_gains() {
+  JointSettings joints[kMaxJoints];
+  GlobalSettings g;
+  configureSample(joints, g);
+  uint8_t blob[kBlobSize];
+  TEST_ASSERT_EQUAL(kBlobSizeV7, packOlder(joints, g, 7, blob));
+  TEST_ASSERT_EQUAL(322, kBlobSizeV7);
+  JointSettings loaded[kMaxJoints];
+  GlobalSettings lg;
+  TEST_ASSERT_EQUAL(BlobStatus::Upgraded, unpackConfig(blob, kBlobSizeV7, kDefaults, kMaxJoints, kEncoders,
+                                                       GlobalSettings(), loaded, lg));
+  TEST_ASSERT_EQUAL(-2202, loaded[5].offset);
+  for (uint8_t i = 0; i < kMaxJoints; ++i) {
+    TEST_ASSERT_FALSE(gainStored(loaded[i].kp));
+    TEST_ASSERT_FALSE(gainStored(loaded[i].kd));
+  }
+}
+
 void test_offset_setting_rules() {
   JointSettings joints[kMaxJoints];
   loadDefaults(joints);
@@ -272,6 +296,41 @@ void test_offset_setting_rules() {
   TEST_ASSERT_EQUAL(6, c.joint);
   TEST_ASSERT_TRUE(requiresDisarmed(c));
   TEST_ASSERT_NOT_NULL(parseCommand("zero", c));
+
+  TEST_ASSERT_NULL(parseCommand("regs", c));
+  TEST_ASSERT_EQUAL(Verb::Regs, c.verb);
+  TEST_ASSERT_EQUAL(0, c.joint);
+  TEST_ASSERT_TRUE(requiresDisarmed(c));
+  TEST_ASSERT_NULL(parseCommand("regs all", c));
+  TEST_ASSERT_EQUAL(0, c.joint);
+  TEST_ASSERT_NULL(parseCommand("regs 6", c));
+  TEST_ASSERT_EQUAL(Verb::Regs, c.verb);
+  TEST_ASSERT_EQUAL(6, c.joint);
+  TEST_ASSERT_NOT_NULL(parseCommand("regs 0", c));
+  TEST_ASSERT_NOT_NULL(parseCommand("regs 6 7", c));
+
+  TEST_ASSERT_FALSE(gainStored(joints[5].kp));  // defaults: the servo's own gains
+  TEST_ASSERT_NULL(parseCommand("set 6 kp 64", c));
+  TEST_ASSERT_EQUAL(SetKey::Kp, c.key);
+  TEST_ASSERT_EQUAL(6, c.joint);
+  TEST_ASSERT_EQUAL_FLOAT(64.0f, c.values[0]);
+  TEST_ASSERT_FALSE(requiresDisarmed(c));  // tuned while the joint follows
+  TEST_ASSERT_TRUE(isServoGainKey(c.key));
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL(64, joints[5].kp);
+  TEST_ASSERT_NULL(parseCommand("set 6 kd 0", c));
+  TEST_ASSERT_EQUAL(SetKey::Kd, c.key);
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_EQUAL(0, joints[5].kd);
+  TEST_ASSERT_NULL(parseCommand("set 6 kp none", c));
+  TEST_ASSERT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_FALSE(gainStored(joints[5].kp));
+  TEST_ASSERT_NULL(parseCommand("set 5 kp 64", c));  // SCS0009: P is EEPROM only
+  TEST_ASSERT_NOT_NULL(applySetting(c, joints, kDefaults, kMaxJoints, g, kEncoders));
+  TEST_ASSERT_NOT_NULL(parseCommand("set 6 kp 0", c));    // Kp 0 would let the joint go limp
+  TEST_ASSERT_NOT_NULL(parseCommand("set 6 kp 255", c));
+  TEST_ASSERT_NOT_NULL(parseCommand("set 6 kd 255", c));
+  TEST_ASSERT_NOT_NULL(parseCommand("set 6 kp", c));
 }
 
 // Bench values from DEX_hand_software hls-setup (data/servo_tuning/changes.jsonl).
@@ -855,6 +914,7 @@ int main() {
   RUN_TEST(test_blob_version_4_upgraded);
   RUN_TEST(test_blob_version_5_takes_travel_from_defaults);
   RUN_TEST(test_blob_version_6_has_no_offset);
+  RUN_TEST(test_blob_version_7_has_no_gains);
   RUN_TEST(test_offset_setting_rules);
   RUN_TEST(test_center_offset);
   RUN_TEST(test_shift_for_offset);
